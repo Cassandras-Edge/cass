@@ -1,6 +1,6 @@
 [project]
 name = "cass"
-version = "0.2.0"
+version = "0.3.1"
 description = "Cassandra platform CLI — cookie sync, MCP key management"
 requires-python = ">=3.11"
 dependencies = [

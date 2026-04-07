@@ -13,7 +13,7 @@ import click
 import httpx
 
 REPO = "Cassandras-Edge/cass"
-CURRENT_VERSION = "0.2.0"
+CURRENT_VERSION = "0.3.1"
 
 
 def _detect_target() -> str:

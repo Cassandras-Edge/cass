@@ -13,7 +13,7 @@ from cass.auth import login, logout, whoami
 from cass.cookies import cookies
 from cass.ensure import ensure_key
 from cass.keys import keys
-from cass.update import update, auto_update_check
+from cass.update import update, auto_update_check, CURRENT_VERSION
 
 
 # Check for updates at most once per hour
@@ -44,7 +44,7 @@ def _mark_update_checked() -> None:
 
 
 @click.group()
-@click.version_option()
+@click.version_option(version=CURRENT_VERSION, prog_name="cass")
 def main() -> None:
     """Cassandra platform CLI — cookie sync, MCP key management."""
     if _should_check_update():

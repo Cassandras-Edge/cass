@@ -5,10 +5,17 @@ Cassandra platform CLI — device auth, cookie sync, MCP key management.
 ## Install
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/Cassandras-Edge/cass/main/install.sh | sh
+# With gh CLI (works with private repos)
+gh release download --repo Cassandras-Edge/cass --pattern 'cass-darwin-arm64' --dir ~/.local/bin
+mv ~/.local/bin/cass-darwin-arm64 ~/.local/bin/cass && chmod +x ~/.local/bin/cass
+
+# Or use the install script (auto-detects platform)
+gh api repos/Cassandras-Edge/cass/contents/install.sh --jq '.content' | base64 -d | sh
 ```
 
 Installs to `~/.local/bin/cass`. Set `CASS_INSTALL_DIR` to change the location.
+
+Make sure `~/.local/bin` is in your PATH.
 
 ## Setup
 

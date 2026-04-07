@@ -11,6 +11,7 @@ import click
 
 from cass.auth import login, logout, whoami
 from cass.cookies import cookies
+from cass.ensure import ensure_key
 from cass.keys import keys
 from cass.update import update, auto_update_check
 
@@ -55,5 +56,6 @@ main.add_command(login)
 main.add_command(logout)
 main.add_command(whoami)
 main.add_command(cookies)
+main.add_command(ensure_key)
 main.add_command(keys)
 main.add_command(update)

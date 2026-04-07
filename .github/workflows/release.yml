@@ -14,16 +14,10 @@ jobs:
         include:
           - os: macos-latest
             target: darwin-arm64
-            pyinstaller_args: ""
-          - os: macos-13
-            target: darwin-x86_64
-            pyinstaller_args: ""
           - os: ubuntu-latest
             target: linux-amd64
-            pyinstaller_args: ""
           - os: windows-latest
             target: windows-amd64
-            pyinstaller_args: ""
 
     runs-on: ${{ matrix.os }}
 
@@ -40,14 +34,7 @@ jobs:
           pip install -e .
 
       - name: Build binary
-        run: |
-          pyinstaller --onefile --name cass-${{ matrix.target }} --clean cass_entry.py ${{ matrix.pyinstaller_args }}
-
-      - name: Rename Windows binary
-        if: runner.os == 'Windows'
-        run: |
-          mv dist/cass-${{ matrix.target }}.exe dist/cass-${{ matrix.target }}.exe
-        shell: bash
+        run: pyinstaller --onefile --name cass-${{ matrix.target }} --clean cass_entry.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

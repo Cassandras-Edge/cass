@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import base64
+import glob
 import os
 import shutil
+import sqlite3
 import subprocess
 import tempfile
+import time
 import webbrowser
 from pathlib import Path
 
@@ -40,6 +43,54 @@ SERVICES = {
         "description": "Claude.ai session cookies",
     },
 }
+
+
+def _find_firefox_cookies_db() -> str | None:
+    """Find the default Firefox profile's cookies.sqlite."""
+    pattern = os.path.expanduser(
+        "~/Library/Application Support/Firefox/Profiles/*/cookies.sqlite"
+    )
+    paths = glob.glob(pattern)
+    return paths[0] if paths else None
+
+
+def _check_firefox_cookies(domains: list[str], required_names: list[str] | None = None) -> bool:
+    """Fast check if Firefox has cookies for the given domains. No extraction, no yt-dlp."""
+    db_path = _find_firefox_cookies_db()
+    if not db_path:
+        return False
+
+    tmp = tempfile.mktemp(suffix=".sqlite")
+    shutil.copy2(db_path, tmp)
+    try:
+        conn = sqlite3.connect(tmp)
+        placeholders = ",".join("?" for _ in domains)
+        now = int(time.time())
+
+        if required_names:
+            # Check specific cookie names exist and aren't expired
+            name_placeholders = ",".join("?" for _ in required_names)
+            row = conn.execute(
+                f"SELECT COUNT(DISTINCT name) FROM moz_cookies "
+                f"WHERE host IN ({placeholders}) AND name IN ({name_placeholders}) "
+                f"AND (expiry = 0 OR expiry > ?)",
+                [*domains, *required_names, now],
+            ).fetchone()
+            conn.close()
+            return row[0] == len(required_names)
+        else:
+            # Check any non-expired cookies exist for domains
+            row = conn.execute(
+                f"SELECT COUNT(*) FROM moz_cookies "
+                f"WHERE host IN ({placeholders}) AND (expiry = 0 OR expiry > ?)",
+                [*domains, now],
+            ).fetchone()
+            conn.close()
+            return row[0] > 0
+    except Exception:
+        return False
+    finally:
+        os.unlink(tmp)
 
 
 def _extract_cookies_via_ytdlp(browser: str, probe_url: str) -> list[str]:
@@ -192,6 +243,23 @@ def _sync_service(name: str, svc: dict, dry_run: bool) -> None:
     _push_credentials(name, creds)
     keys = ", ".join(creds.keys())
     click.echo(f"  Synced: {keys} ✓")
+
+
+@cookies.command()
+def status() -> None:
+    """Check which services have valid cookies in Firefox (fast, no network)."""
+    missing = []
+    for name, svc in SERVICES.items():
+        required = list(svc["cookie_names"].keys()) if svc.get("cookie_names") else None
+        ok = _check_firefox_cookies(svc["domains"], required)
+        icon = "ok" if ok else "MISSING"
+        click.echo(f"  {name:12s} {icon}")
+        if not ok:
+            missing.append(name)
+
+    if missing:
+        click.echo(f"\nRun: cass cookies sync {' '.join(missing)}")
+        raise SystemExit(1)
 
 
 @cookies.command()

@@ -1,6 +1,6 @@
 # cass
 
-Cassandra platform CLI — device auth, cookie sync, MCP key management.
+Cassandra platform CLI — auth, keys, cookies, and service management.
 
 ## Install
 

@@ -9,12 +9,8 @@ import click
 
 PORTAL_URL = "https://portal.cassandrasedge.com"
 
-# CF Access service token for programmatic portal access (bypasses CF Access OAuth)
-_CF_ACCESS_CLIENT_ID = "df4eae9c073d0f09b8eb23d42d9499bd.access"
-_CF_ACCESS_CLIENT_SECRET = "dbb089c2798d720003fbd0a305ac85161c450b10a1bb02e3b45a0bb276c03aaa"
-
 # Look for env vars first, then fall back to reading env files from cassandra-stack/env/
-_STACK_ROOT = Path(__file__).resolve().parents[4]  # toolbox/cass/src/cass -> cassandra-stack
+_STACK_ROOT = Path(__file__).resolve().parents[3]  # cass-cli/src/cass -> cassandra-stack
 _ACL_ENV = _STACK_ROOT / "env" / "acl.env"
 
 
@@ -86,19 +82,16 @@ def require_auth() -> tuple[str, dict[str, str]]:
         if _is_reachable(auth_url):
             return auth_url, {"X-Auth-Secret": secret, "Content-Type": "application/json"}
 
-    # Portal mode: cached MCP key from `cass login`
-    from cass.auth import get_cached_auth  # noqa: PLC0415
+    # Portal mode: cached MCP key + CF Access JWT from `cass login`
+    from cass.auth import ensure_auth  # noqa: PLC0415
 
-    auth = get_cached_auth()
-    if not auth:
-        raise click.ClickException("Not authenticated. Run: cass login")
+    auth = ensure_auth()
 
     portal = get_portal_url()
     headers: dict[str, str] = {
         "Authorization": f"Bearer {auth['key']}",
         "Content-Type": "application/json",
-        # CF Access service token — bypasses OAuth redirect for programmatic access
-        "CF-Access-Client-Id": _CF_ACCESS_CLIENT_ID,
-        "CF-Access-Client-Secret": _CF_ACCESS_CLIENT_SECRET,
     }
+    if auth.get("cf_token"):
+        headers["Cookie"] = f"CF_Authorization={auth['cf_token']}"
     return portal, headers

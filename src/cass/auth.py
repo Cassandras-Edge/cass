@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import json
-import threading
+import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -28,23 +29,49 @@ def get_cached_auth() -> dict | None:
     return None
 
 
-def save_auth(key: str, email: str, cf_token: str | None = None) -> None:
-    AUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
-    data: dict = {"key": key, "email": email}
-    if cf_token:
-        data["cf_token"] = cf_token
-    AUTH_FILE.write_text(json.dumps(data, indent=2))
-    AUTH_FILE.chmod(0o600)
+def _cf_token_valid(token: str) -> bool:
+    """Check if a CF Access JWT is still valid (not expired)."""
+    try:
+        payload_b64 = token.split(".")[1]
+        # Fix base64 padding
+        padding = 4 - len(payload_b64) % 4
+        if padding != 4:
+            payload_b64 += "=" * padding
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64))
+        exp = payload.get("exp", 0)
+        # Valid if >5 min remaining
+        return time.time() < (exp - 300)
+    except Exception:
+        return False
 
 
-def clear_auth() -> None:
-    if AUTH_FILE.exists():
-        AUTH_FILE.unlink()
+def ensure_auth() -> dict:
+    """Get valid auth, auto-triggering browser login if needed."""
+    auth = get_cached_auth()
+
+    if auth and auth.get("cf_token") and _cf_token_valid(auth["cf_token"]):
+        return auth
+
+    # Need fresh auth — trigger browser login
+    if auth and auth.get("cf_token"):
+        click.echo("CF Access session expired — re-authenticating...")
+    elif auth:
+        click.echo("No CF Access token cached — authenticating...")
+    else:
+        click.echo("Not logged in — opening browser to authenticate...")
+
+    _run_login_flow()
+
+    auth = get_cached_auth()
+    if not auth:
+        raise click.ClickException("Login failed — no credentials received")
+    if not auth.get("cf_token"):
+        raise click.ClickException("Login succeeded but no CF Access token received. Is portal updated?")
+    return auth
 
 
-@click.command()
-def login() -> None:
-    """Authenticate with the Cassandra portal via browser OAuth."""
+def _run_login_flow() -> None:
+    """Open browser for OAuth login and wait for callback."""
     result: dict = {}
 
     class CallbackHandler(BaseHTTPRequestHandler):
@@ -76,7 +103,7 @@ def login() -> None:
                 self.wfile.write(b"<html><body><h2>Login failed</h2></body></html>")
 
         def log_message(self, format: str, *args: object) -> None:  # noqa: A002
-            pass  # suppress request logs
+            pass
 
     server = HTTPServer(("127.0.0.1", 0), CallbackHandler)
     port = server.server_address[1]
@@ -87,16 +114,35 @@ def login() -> None:
     click.echo(f"If it doesn't open, visit: {login_url}")
     webbrowser.open(login_url)
 
-    # Handle one request (the callback)
     server.handle_request()
     server.server_close()
 
     if result.get("key"):
         save_auth(result["key"], result["email"], result.get("cf_token"))
         click.echo(f"Logged in as {result['email']}")
-        click.echo(f"Token cached at {AUTH_FILE}")
     else:
         raise click.ClickException("Login failed — no key received")
+
+
+def save_auth(key: str, email: str, cf_token: str | None = None) -> None:
+    AUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
+    data: dict = {"key": key, "email": email}
+    if cf_token:
+        data["cf_token"] = cf_token
+    AUTH_FILE.write_text(json.dumps(data, indent=2))
+    AUTH_FILE.chmod(0o600)
+
+
+def clear_auth() -> None:
+    if AUTH_FILE.exists():
+        AUTH_FILE.unlink()
+
+
+@click.command()
+def login() -> None:
+    """Authenticate with the Cassandra portal via browser OAuth."""
+    _run_login_flow()
+    click.echo(f"Token cached at {AUTH_FILE}")
 
 
 @click.command()

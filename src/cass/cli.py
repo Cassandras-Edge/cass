@@ -48,7 +48,7 @@ def _mark_update_checked() -> None:
 @click.group()
 @click.version_option(version=CURRENT_VERSION, prog_name="cass")
 def main() -> None:
-    """Cassandra platform CLI — cookie sync, MCP key management."""
+    """Cassandra platform CLI — auth, keys, cookies, and service management."""
     if _should_check_update():
         _mark_update_checked()
         auto_update_check()

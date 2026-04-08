@@ -58,17 +58,17 @@ def sync(browser: str, email: str | None, service: str, dry_run: bool) -> None:
 
         base_url, headers = require_auth()
 
-        # Direct auth service mode
         if "X-Auth-Secret" in headers:
+            # Direct auth service mode
             url = f"{base_url}/credentials/{email}/{service}"
             body = {"credentials": {"youtube_cookies": cookies_b64}}
         else:
-            # Portal mode — use extension endpoint
+            # Portal mode — CF Access JWT from login lets this through
             url = f"{base_url}/api/extension/credentials/{service}"
             body = {"youtube_cookies": cookies_b64}
 
         click.echo(f"Pushing to {service}...")
-        resp = httpx.post(url, headers=headers, json=body, timeout=15)
+        resp = httpx.put(url, headers=headers, json=body, timeout=15)
         resp.raise_for_status()
         click.echo("Done — cookies synced.")
 

@@ -9,6 +9,10 @@ import click
 
 PORTAL_URL = "https://portal.cassandrasedge.com"
 
+# CF Access service token for programmatic portal access (bypasses CF Access OAuth)
+_CF_ACCESS_CLIENT_ID = "df4eae9c073d0f09b8eb23d42d9499bd.access"
+_CF_ACCESS_CLIENT_SECRET = "dbb089c2798d720003fbd0a305ac85161c450b10a1bb02e3b45a0bb276c03aaa"
+
 # Look for env vars first, then fall back to reading env files from cassandra-stack/env/
 _STACK_ROOT = Path(__file__).resolve().parents[4]  # toolbox/cass/src/cass -> cassandra-stack
 _ACL_ENV = _STACK_ROOT / "env" / "acl.env"
@@ -90,7 +94,11 @@ def require_auth() -> tuple[str, dict[str, str]]:
         raise click.ClickException("Not authenticated. Run: cass login")
 
     portal = get_portal_url()
-    return portal, {
+    headers: dict[str, str] = {
         "Authorization": f"Bearer {auth['key']}",
         "Content-Type": "application/json",
+        # CF Access service token — bypasses OAuth redirect for programmatic access
+        "CF-Access-Client-Id": _CF_ACCESS_CLIENT_ID,
+        "CF-Access-Client-Secret": _CF_ACCESS_CLIENT_SECRET,
     }
+    return portal, headers

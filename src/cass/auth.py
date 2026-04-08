@@ -28,9 +28,12 @@ def get_cached_auth() -> dict | None:
     return None
 
 
-def save_auth(key: str, email: str) -> None:
+def save_auth(key: str, email: str, cf_token: str | None = None) -> None:
     AUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
-    AUTH_FILE.write_text(json.dumps({"key": key, "email": email}, indent=2))
+    data: dict = {"key": key, "email": email}
+    if cf_token:
+        data["cf_token"] = cf_token
+    AUTH_FILE.write_text(json.dumps(data, indent=2))
     AUTH_FILE.chmod(0o600)
 
 
@@ -51,10 +54,13 @@ def login() -> None:
 
             key = params.get("key", [None])[0]
             email = params.get("email", [None])[0]
+            cf_token = params.get("cf_token", [None])[0]
 
             if key and email:
                 result["key"] = key
                 result["email"] = email
+                if cf_token:
+                    result["cf_token"] = cf_token
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html")
                 self.end_headers()
@@ -86,7 +92,7 @@ def login() -> None:
     server.server_close()
 
     if result.get("key"):
-        save_auth(result["key"], result["email"])
+        save_auth(result["key"], result["email"], result.get("cf_token"))
         click.echo(f"Logged in as {result['email']}")
         click.echo(f"Token cached at {AUTH_FILE}")
     else:

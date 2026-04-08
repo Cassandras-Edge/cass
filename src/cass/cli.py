@@ -11,6 +11,7 @@ import click
 
 from cass.auth import login, logout, whoami
 from cass.cookies import cookies
+from cass.discord import discord
 from cass.ensure import ensure_key
 from cass.keys import keys
 from cass.setup import setup
@@ -57,6 +58,7 @@ main.add_command(login)
 main.add_command(logout)
 main.add_command(whoami)
 main.add_command(cookies)
+main.add_command(discord)
 main.add_command(ensure_key)
 main.add_command(keys)
 main.add_command(setup)

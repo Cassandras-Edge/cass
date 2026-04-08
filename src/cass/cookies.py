@@ -10,13 +10,17 @@ import sqlite3
 import subprocess
 import tempfile
 import time
-import webbrowser
 from pathlib import Path
 
 import click
 import httpx
 
 from cass.config import get_default_email, require_auth
+
+
+def _open_in_firefox(url: str) -> None:
+    """Open a URL in Firefox specifically (cookies are extracted from Firefox)."""
+    subprocess.run(["open", "-a", "Firefox", url], capture_output=True)
 
 # Service definitions
 SERVICES = {
@@ -211,7 +215,7 @@ def _sync_service(name: str, svc: dict, dry_run: bool) -> None:
 
     if not lines:
         click.echo(f"  No cookies found. Opening login page...")
-        webbrowser.open(svc["login_url"])
+        _open_in_firefox(svc["login_url"])
         click.echo("  Sign in, then re-run this command.")
         return
 
@@ -221,7 +225,7 @@ def _sync_service(name: str, svc: dict, dry_run: bool) -> None:
         creds = _extract_named_cookies(lines, svc["domains"], cookie_names)
         if not creds:
             click.echo(f"  Cookies present but missing required keys. Opening login page...")
-            webbrowser.open(svc["login_url"])
+            _open_in_firefox(svc["login_url"])
             click.echo("  Sign in, then re-run this command.")
             return
     else:
@@ -229,7 +233,7 @@ def _sync_service(name: str, svc: dict, dry_run: bool) -> None:
         filtered = _filter_cookie_lines(lines, svc["domains"])
         if not filtered:
             click.echo(f"  No cookies for {', '.join(svc['domains'])}. Opening login page...")
-            webbrowser.open(svc["login_url"])
+            _open_in_firefox(svc["login_url"])
             click.echo("  Sign in, then re-run this command.")
             return
         creds = {svc["credential_key"]: _lines_to_jar_b64(filtered)}

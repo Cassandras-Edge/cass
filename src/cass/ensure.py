@@ -8,7 +8,7 @@ from pathlib import Path
 import click
 import httpx
 
-from cass.auth import get_cached_auth
+from cass.auth import ensure_auth, get_cached_auth
 from cass.config import get_portal_url
 
 KEYS_DIR = Path.home() / ".config" / "cass" / "keys"
@@ -59,37 +59,21 @@ def ensure_key(service: str, quiet: bool, header: bool) -> None:
             click.echo(f"Key for {service}: {existing[:20]}...")
         return
 
-    # Need to create — check login
-    auth = get_cached_auth()
-    if not auth:
-        raise click.ClickException("Not logged in. Run: cass login")
+    # Need to create — ensure valid auth (auto-triggers browser login if CF Access expired)
+    auth = ensure_auth()
 
     portal = get_portal_url()
-    headers = {
+    headers: dict[str, str] = {
         "Authorization": f"Bearer {auth['key']}",
         "Content-Type": "application/json",
     }
+    if auth.get("cf_token"):
+        headers["Cookie"] = f"CF_Authorization={auth['cf_token']}"
 
-    # Validate our login key is still good
     if not quiet:
         click.echo(f"Creating key for {service}...")
 
-    try:
-        # Use the portal's extension whoami to verify auth + get email
-        resp = httpx.get(
-            f"{portal}/api/extension/whoami",
-            headers=headers,
-            timeout=15,
-        )
-        if resp.status_code == 401:
-            raise click.ClickException("Login expired. Run: cass login")
-        resp.raise_for_status()
-        email = resp.json().get("email", auth.get("email", ""))
-    except httpx.ConnectError:
-        # Portal not reachable — try to use the auth from login directly
-        email = auth.get("email", "")
-        if not email:
-            raise click.ClickException("Portal unreachable and no cached email. Run: cass login")
+    email = auth.get("email", "")
 
     # Create key via portal API
     # First, find user's default project

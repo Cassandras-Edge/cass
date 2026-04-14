@@ -8,8 +8,10 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
+import webbrowser
 from pathlib import Path
 
 import click
@@ -20,7 +22,26 @@ from cass.config import get_default_email, require_auth
 
 def _open_in_firefox(url: str) -> None:
     """Open a URL in Firefox specifically (cookies are extracted from Firefox)."""
-    subprocess.run(["open", "-a", "Firefox", url], capture_output=True)
+    if sys.platform == "darwin":
+        subprocess.run(["open", "-a", "Firefox", url], capture_output=True)
+        return
+    if sys.platform == "win32":
+        # Try common install locations, then fall back to default browser.
+        candidates = [
+            r"C:\Program Files\Mozilla Firefox\firefox.exe",
+            r"C:\Program Files (x86)\Mozilla Firefox\firefox.exe",
+        ]
+        for exe in candidates:
+            if os.path.exists(exe):
+                subprocess.Popen([exe, url])
+                return
+        webbrowser.open(url)
+        return
+    # Linux / other
+    if shutil.which("firefox"):
+        subprocess.Popen(["firefox", url])
+    else:
+        webbrowser.open(url)
 
 # Service definitions
 SERVICES = {
@@ -46,16 +67,33 @@ SERVICES = {
         "probe_url": "https://claude.ai",
         "description": "Claude.ai session cookies",
     },
+    "sxm": {
+        "credential_key": "sxm_cookies",
+        "domains": [".siriusxm.com", "siriusxm.com", ".www.siriusxm.com", "www.siriusxm.com"],
+        "login_url": "https://www.siriusxm.com/",
+        "probe_url": "https://www.siriusxm.com/",
+        "description": "SiriusXM session cookies",
+    },
 }
 
 
 def _find_firefox_cookies_db() -> str | None:
-    """Find the default Firefox profile's cookies.sqlite."""
-    pattern = os.path.expanduser(
-        "~/Library/Application Support/Firefox/Profiles/*/cookies.sqlite"
-    )
-    paths = glob.glob(pattern)
-    return paths[0] if paths else None
+    """Find the default Firefox profile's cookies.sqlite (cross-platform)."""
+    if sys.platform == "darwin":
+        patterns = ["~/Library/Application Support/Firefox/Profiles/*/cookies.sqlite"]
+    elif sys.platform == "win32":
+        appdata = os.environ.get("APPDATA", "")
+        patterns = [os.path.join(appdata, "Mozilla", "Firefox", "Profiles", "*", "cookies.sqlite")]
+    else:
+        patterns = [
+            "~/.mozilla/firefox/*/cookies.sqlite",
+            "~/snap/firefox/common/.mozilla/firefox/*/cookies.sqlite",
+        ]
+    for pat in patterns:
+        paths = glob.glob(os.path.expanduser(pat))
+        if paths:
+            return paths[0]
+    return None
 
 
 def _check_firefox_cookies(domains: list[str], required_names: list[str] | None = None) -> bool:

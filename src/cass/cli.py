@@ -14,6 +14,7 @@ from cass.cookies import cookies
 from cass.discord import discord
 from cass.ensure import ensure_key
 from cass.keys import keys
+from cass.patched_cli import patched_cli
 from cass.setup import setup
 from cass.update import update, auto_update_check, CURRENT_VERSION
 
@@ -61,5 +62,6 @@ main.add_command(cookies)
 main.add_command(discord)
 main.add_command(ensure_key)
 main.add_command(keys)
+main.add_command(patched_cli)
 main.add_command(setup)
 main.add_command(update)

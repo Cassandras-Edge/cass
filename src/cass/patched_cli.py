@@ -60,6 +60,7 @@ def patched_cli() -> None:
 @click.option("--release", "release_tag", default=None, help="Specific cc-patches release tag (default: latest).")
 def install(version: str, local: bool, release_tag: str | None) -> None:
     """Install the patched Claude Code CLI to ~/.local/bin/claude-patched."""
+    require_supported_host()
     BIN_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     if local:
@@ -126,8 +127,19 @@ def _install_local(version: str) -> None:
     _smoke_test(version)
 
 
+def require_supported_host() -> None:
+    """Raise if we're running on native Windows. WSL reports as Linux and is fine."""
+    if platform.system().lower() == "windows":
+        raise click.ClickException(
+            "Native Windows is not supported.\n"
+            "Run cass inside WSL — the linux-x64 build works there with zero changes.\n"
+            "See: https://learn.microsoft.com/windows/wsl/install"
+        )
+
+
 def _host_target() -> str:
     """Map host platform/arch to release artifact suffix (darwin-arm64, linux-x64, ...)."""
+    require_supported_host()
     system = platform.system().lower()
     arch = {"arm64": "arm64", "aarch64": "arm64", "x86_64": "x64", "amd64": "x64"}.get(
         platform.machine().lower(), platform.machine().lower()

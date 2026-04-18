@@ -1,6 +1,6 @@
 [project]
 name = "cass"
-version = "0.6.0"
+version = "0.6.1"
 description = "Cassandra platform CLI — auth, keys, cookies, and service management"
 requires-python = ">=3.11"
 dependencies = [

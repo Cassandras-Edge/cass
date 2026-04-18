@@ -7,7 +7,7 @@ import subprocess
 
 import click
 
-from cass.patched_cli import _install_prebuilt
+from cass.patched_cli import _install_prebuilt, require_supported_host
 
 
 MARKETPLACE_REPO = "Cassandras-Edge/cassandra-marketplace"
@@ -40,6 +40,7 @@ def setup(install_all: bool) -> None:
     Registers the marketplace, enables cass-cli and default MCP plugins.
     Use --all to enable every available plugin.
     """
+    require_supported_host()
     claude = shutil.which("claude")
     if not claude:
         raise click.ClickException("claude CLI not found in PATH. Install Claude Code first.")

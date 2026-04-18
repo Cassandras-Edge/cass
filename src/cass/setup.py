@@ -7,11 +7,13 @@ import subprocess
 
 import click
 
+from cass.patched_cli import _install_prebuilt
+
 
 MARKETPLACE_REPO = "Cassandras-Edge/cassandra-marketplace"
-DEFAULT_PLUGINS = ["cass-cli", "media-mcp", "market-research", "gemini-mcp"]
+DEFAULT_PLUGINS = ["cass-cli", "stopgate", "media-mcp", "market-research", "gemini-mcp"]
 ALL_PLUGINS = [
-    "cass-cli", "media-mcp", "twitter-mcp", "reddit-mcp", "claudeai-mcp",
+    "cass-cli", "stopgate", "media-mcp", "twitter-mcp", "reddit-mcp", "claudeai-mcp",
     "discord-mcp", "market-research", "gemini-mcp", "perplexity-mcp",
 ]
 
@@ -45,6 +47,18 @@ def setup(install_all: bool) -> None:
     # Add marketplace
     click.echo("Adding Cassandra marketplace...")
     _run_claude("plugin", "marketplace", "add", MARKETPLACE_REPO)
+
+    # Install the patched CLI at ~/.local/bin/claude-patched — required by
+    # stopgate (and any future plugin that needs `claude --bare` + OAuth).
+    click.echo("")
+    click.echo("Installing patched Claude CLI...")
+    try:
+        _install_prebuilt(None)
+    except click.ClickException as e:
+        click.echo(f"  warning: {e.message}", err=True)
+        click.echo("  Stopgate hook will silent-fail until `cass patched-cli install` succeeds.", err=True)
+    except Exception as e:
+        click.echo(f"  warning: patched-cli install failed: {e}", err=True)
 
     # Pick plugins
     plugins = ALL_PLUGINS if install_all else DEFAULT_PLUGINS

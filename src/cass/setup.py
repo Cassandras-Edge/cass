@@ -11,9 +11,9 @@ from cass.patched_cli import _install_prebuilt, require_supported_host
 
 
 MARKETPLACE_REPO = "Cassandras-Edge/cassandra-marketplace"
-DEFAULT_PLUGINS = ["cass-cli", "stopgate", "media-mcp", "market-research", "gemini-mcp"]
+DEFAULT_PLUGINS = ["stopgate", "media-mcp", "market-research", "gemini-mcp"]
 ALL_PLUGINS = [
-    "cass-cli", "stopgate", "media-mcp", "twitter-mcp", "reddit-mcp", "claudeai-mcp",
+    "stopgate", "media-mcp", "twitter-mcp", "reddit-mcp", "claudeai-mcp",
     "discord-mcp", "market-research", "gemini-mcp", "perplexity-mcp",
 ]
 

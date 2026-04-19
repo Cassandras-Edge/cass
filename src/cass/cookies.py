@@ -160,6 +160,33 @@ def _extract_named_cookies(lines: list[str], domains: list[str],
     return result
 
 
+def _validate_cookies_b64(cookies_b64: str, probe_url: str) -> tuple[bool, str]:
+    """Validate base64-encoded cookie jar by attempting a yt-dlp fetch.
+
+    Returns (ok, detail) — detail is the video title on success, or error message on failure.
+    """
+    ytdlp = shutil.which("yt-dlp")
+    if not ytdlp:
+        return False, "yt-dlp not found"
+
+    cookies_path = Path(tempfile.mkdtemp()) / "validate_cookies.txt"
+    try:
+        raw = base64.b64decode(cookies_b64)
+        cookies_path.write_bytes(raw)
+        result = subprocess.run(
+            [ytdlp, "--cookies", str(cookies_path), "--skip-download",
+             "--print", "title", "--no-warnings", probe_url],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return True, result.stdout.strip()
+        return False, result.stderr.strip()[:200] or "yt-dlp failed with no output"
+    except Exception as exc:
+        return False, str(exc)
+    finally:
+        cookies_path.unlink(missing_ok=True)
+
+
 def _push_credentials(service: str, credentials: dict[str, str]) -> None:
     """Push credentials to auth service."""
     base_url, headers = require_auth()
@@ -184,11 +211,13 @@ def cookies() -> None:
 @cookies.command()
 @click.argument("services", nargs=-1)
 @click.option("--dry-run", is_flag=True, help="Extract cookies but don't push.")
-def sync(services: tuple[str, ...], dry_run: bool) -> None:
+@click.option("--no-open", is_flag=True,
+              help="Don't open login pages on missing/invalid cookies. For unattended use (e.g. session-start hooks).")
+def sync(services: tuple[str, ...], dry_run: bool, no_open: bool) -> None:
     """Sync browser cookies to services.
 
     Specify service names (yt-mcp, twitter, claude-ai) or omit for all.
-    Opens login pages automatically if cookies are missing.
+    Opens login pages automatically if cookies are missing (unless --no-open).
     """
     ytdlp = shutil.which("yt-dlp")
     if not ytdlp:
@@ -203,20 +232,26 @@ def sync(services: tuple[str, ...], dry_run: bool) -> None:
 
         svc = SERVICES[name]
         click.echo(f"\n── {name}: {svc['description']} ──")
-        _sync_service(name, svc, dry_run)
+        _sync_service(name, svc, dry_run, no_open)
 
     click.echo()
 
 
-def _sync_service(name: str, svc: dict, dry_run: bool) -> None:
+def _sync_service(name: str, svc: dict, dry_run: bool, no_open: bool = False) -> None:
     """Extract and sync cookies for a single service."""
+    def _prompt_login(msg: str) -> None:
+        click.echo(f"  {msg}")
+        if no_open:
+            click.echo("  Sign in to Firefox, then re-run: cass cookies sync " + name)
+        else:
+            _open_in_firefox(svc["login_url"])
+            click.echo("  Sign in, then re-run this command.")
+
     click.echo("  Extracting from firefox...")
     lines = _extract_cookies_via_ytdlp("firefox", svc["probe_url"])
 
     if not lines:
-        click.echo(f"  No cookies found. Opening login page...")
-        _open_in_firefox(svc["login_url"])
-        click.echo("  Sign in, then re-run this command.")
+        _prompt_login("No cookies found.")
         return
 
     cookie_names = svc.get("cookie_names")
@@ -224,19 +259,27 @@ def _sync_service(name: str, svc: dict, dry_run: bool) -> None:
         # Named cookie mode (twitter: auth_token, ct0)
         creds = _extract_named_cookies(lines, svc["domains"], cookie_names)
         if not creds:
-            click.echo(f"  Cookies present but missing required keys. Opening login page...")
-            _open_in_firefox(svc["login_url"])
-            click.echo("  Sign in, then re-run this command.")
+            _prompt_login("Cookies present but missing required keys.")
             return
     else:
         # Full cookie jar mode (yt-mcp, claude-ai)
         filtered = _filter_cookie_lines(lines, svc["domains"])
         if not filtered:
-            click.echo(f"  No cookies for {', '.join(svc['domains'])}. Opening login page...")
-            _open_in_firefox(svc["login_url"])
-            click.echo("  Sign in, then re-run this command.")
+            _prompt_login(f"No cookies for {', '.join(svc['domains'])}.")
             return
         creds = {svc["credential_key"]: _lines_to_jar_b64(filtered)}
+
+    # Validate cookie jar before pushing (yt-mcp, claude-ai — full jar mode)
+    cred_key = svc.get("credential_key", "")
+    if cred_key in creds and svc.get("probe_url"):
+        click.echo("  Validating cookies...")
+        ok, detail = _validate_cookies_b64(creds[cred_key], svc["probe_url"])
+        if ok:
+            click.echo(f"  Valid — {detail}")
+        else:
+            click.echo(f"  INVALID — {detail}", err=True)
+            _prompt_login("Cookies are stale or logged out.")
+            return
 
     if dry_run:
         keys = ", ".join(creds.keys())

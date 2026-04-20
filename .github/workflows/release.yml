@@ -31,10 +31,13 @@ jobs:
       - name: Install dependencies
         run: |
           pip install pyinstaller
-          pip install -e .
+          pip install .
 
       - name: Build binary
-        run: pyinstaller --onefile --name cass-${{ matrix.target }} --clean cass_entry.py
+        # --copy-metadata includes cass's .dist-info so that importlib.metadata
+        # can resolve the version inside the frozen binary. Without it,
+        # CURRENT_VERSION falls back to "0.0.0-dev".
+        run: pyinstaller --onefile --copy-metadata cass --name cass-${{ matrix.target }} --clean cass_entry.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

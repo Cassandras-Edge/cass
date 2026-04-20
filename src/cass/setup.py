@@ -38,11 +38,11 @@ def _run_claude(*args: str) -> bool:
     return True
 
 
-def sync_platform() -> None:
-    """Refresh the marketplace cache, update the patched CLI, bring every
-    Cassandra plugin to latest, and re-populate MCP keys. Shared by
-    `cass setup` (after adding the marketplace) and `cass update` (after
-    self-upgrading the cass binary).
+def sync_platform(install_missing: bool) -> None:
+    """Refresh marketplace + patched CLI + plugins + MCP keys. Shared by
+    `cass setup` (install_missing=True — enable every Cassandra plugin) and
+    `cass update` (install_missing=False — only touch what's already
+    installed, respecting the user's opt-out choices).
     """
     require_supported_host()
     claude = shutil.which("claude")
@@ -62,19 +62,27 @@ def sync_platform() -> None:
         click.echo(f"  warning: patched-cli install failed: {e}", err=True)
 
     installed = _read_installed_plugins()
+    touched: list[str] = []
     for plugin in ALL_PLUGINS:
         qualified = f"{plugin}@cassandra-plugins"
         if qualified in installed:
             click.echo(f"Updating {plugin}...")
             _run_claude("plugin", "update", qualified)
-        else:
+            touched.append(plugin)
+        elif install_missing:
             click.echo(f"Enabling {plugin}...")
             _run_claude("plugin", "install", qualified)
+            touched.append(plugin)
+
+    if not touched:
+        click.echo("")
+        click.echo("No Cassandra plugins installed. Run `cass setup` to enable them.")
+        return
 
     click.echo("")
     click.echo("Populating MCP keys...")
     try:
-        _populate_mcp_keys(ALL_PLUGINS)
+        _populate_mcp_keys(touched)
     except click.ClickException as e:
         click.echo(f"  warning: {e.message}", err=True)
         click.echo("  Run `cass refresh-keys` manually to retry.", err=True)
@@ -91,7 +99,7 @@ def setup() -> None:
     click.echo("Adding Cassandra marketplace...")
     _run_claude("plugin", "marketplace", "add", MARKETPLACE_REPO)
 
-    sync_platform()
+    sync_platform(install_missing=True)
 
     click.echo("")
     click.echo("Done! Installed plugins:")

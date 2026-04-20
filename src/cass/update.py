@@ -179,7 +179,7 @@ def update(check: bool, binary_only: bool) -> None:
     # cli.py → update.py (at --version time) and setup.py → auth.py.
     from cass.setup import sync_platform  # noqa: PLC0415
     click.echo("")
-    sync_platform()
+    sync_platform(install_missing=False)
     click.echo("")
     click.echo("Update complete. Restart Claude Code to pick up new plugin versions.")
 

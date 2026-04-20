@@ -38,38 +38,29 @@ def _run_claude(*args: str) -> bool:
     return True
 
 
-@click.command()
-def setup() -> None:
-    """Set up Claude Code with the Cassandra marketplace and plugins.
-
-    Registers the marketplace and enables every Cassandra plugin. To opt
-    out of a specific plugin afterward, use `claude plugin disable <name>`.
+def sync_platform() -> None:
+    """Refresh the marketplace cache, update the patched CLI, bring every
+    Cassandra plugin to latest, and re-populate MCP keys. Shared by
+    `cass setup` (after adding the marketplace) and `cass update` (after
+    self-upgrading the cass binary).
     """
     require_supported_host()
     claude = shutil.which("claude")
     if not claude:
         raise click.ClickException("claude CLI not found in PATH. Install Claude Code first.")
 
-    # Add marketplace (idempotent) + refresh its cache so we see latest versions.
-    click.echo("Adding Cassandra marketplace...")
-    _run_claude("plugin", "marketplace", "add", MARKETPLACE_REPO)
+    click.echo("Refreshing marketplace...")
     _run_claude("plugin", "marketplace", "update", "cassandra-plugins")
 
-    # Install the patched CLI at ~/.local/bin/claude-patched — required by
-    # stopgate (and any future plugin that needs `claude --bare` + OAuth).
     click.echo("")
-    click.echo("Installing patched Claude CLI...")
+    click.echo("Updating patched Claude CLI...")
     try:
         _install_prebuilt(None)
     except click.ClickException as e:
         click.echo(f"  warning: {e.message}", err=True)
-        click.echo("  Stopgate hook will silent-fail until `cass patched-cli install` succeeds.", err=True)
     except Exception as e:
         click.echo(f"  warning: patched-cli install failed: {e}", err=True)
 
-    # Install new plugins, update existing ones. `claude plugin install` does
-    # not upgrade an already-installed plugin — we have to route to `update`
-    # based on current install state.
     installed = _read_installed_plugins()
     for plugin in ALL_PLUGINS:
         qualified = f"{plugin}@cassandra-plugins"
@@ -80,9 +71,6 @@ def setup() -> None:
             click.echo(f"Enabling {plugin}...")
             _run_claude("plugin", "install", qualified)
 
-    # Fetch MCP keys and write them to plugin user config. Plugin manifests
-    # resolve ${user_config.mcpKey} in static Authorization headers at MCP
-    # load time — no per-reconnect shell spawn.
     click.echo("")
     click.echo("Populating MCP keys...")
     try:
@@ -91,11 +79,24 @@ def setup() -> None:
         click.echo(f"  warning: {e.message}", err=True)
         click.echo("  Run `cass refresh-keys` manually to retry.", err=True)
 
+
+@click.command()
+def setup() -> None:
+    """First-time Claude Code setup with the Cassandra marketplace.
+
+    Registers the marketplace and enables every Cassandra plugin. Idempotent —
+    re-running is equivalent to `cass update` except it also re-adds the
+    marketplace (a no-op if already registered).
+    """
+    click.echo("Adding Cassandra marketplace...")
+    _run_claude("plugin", "marketplace", "add", MARKETPLACE_REPO)
+
+    sync_platform()
+
     click.echo("")
     click.echo("Done! Installed plugins:")
     for p in ALL_PLUGINS:
         click.echo(f"  - {p}")
-
     click.echo("")
     click.echo("Restart Claude Code to activate plugins.")
 

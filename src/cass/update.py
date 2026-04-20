@@ -142,11 +142,12 @@ def install(target: str, force: bool) -> None:
 
 
 @click.command()
-@click.option("--check", is_flag=True, help="Check for updates without installing.")
-def update(check: bool) -> None:
-    """Update cass to the latest version.
-
-    Thin alias for `cass install latest`. Kept for muscle memory.
+@click.option("--check", is_flag=True, help="Only report what would be updated, don't install.")
+@click.option("--binary-only", is_flag=True, help="Update the cass binary only; skip plugins/patched-cli/keys.")
+def update(check: bool, binary_only: bool) -> None:
+    """Update everything — the cass binary, the patched Claude CLI, all
+    Cassandra plugins, and MCP keys. Run this periodically to pull the
+    latest of everything.
     """
     click.echo(f"Current version: {CURRENT_VERSION}")
 
@@ -158,16 +159,29 @@ def update(check: bool) -> None:
     latest = release["tag_name"].lstrip("v")
     click.echo(f"Latest version:  {latest}")
 
-    if latest == CURRENT_VERSION:
-        click.echo("Already up to date.")
-        return
-
     if check:
-        click.echo(f"Update available: {CURRENT_VERSION} → {latest}")
+        if latest == CURRENT_VERSION:
+            click.echo("cass is up to date. Plugins/patched CLI not checked in --check mode.")
+        else:
+            click.echo(f"cass update available: {CURRENT_VERSION} → {latest}")
         return
 
-    installed = _install_release(release)
-    click.echo(f"Updated: {CURRENT_VERSION} → {installed}")
+    if latest != CURRENT_VERSION:
+        installed_version = _install_release(release)
+        click.echo(f"Updated cass: {CURRENT_VERSION} → {installed_version}")
+    else:
+        click.echo("cass binary is up to date.")
+
+    if binary_only:
+        return
+
+    # Sync the rest of the stack. Deferred import avoids a circular between
+    # cli.py → update.py (at --version time) and setup.py → auth.py.
+    from cass.setup import sync_platform  # noqa: PLC0415
+    click.echo("")
+    sync_platform()
+    click.echo("")
+    click.echo("Update complete. Restart Claude Code to pick up new plugin versions.")
 
 
 def auto_update_check() -> None:

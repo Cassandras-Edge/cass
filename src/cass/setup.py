@@ -8,6 +8,7 @@ import subprocess
 import click
 
 from cass.patched_cli import _install_prebuilt, require_supported_host
+from cass.refresh_keys import PLUGIN_SERVICES, _fetch_new_key, _load_settings, _save_service_key, _save_settings, _write_plugin_option, get_service_key
 
 
 MARKETPLACE_REPO = "Cassandras-Edge/cassandra-marketplace"
@@ -71,6 +72,17 @@ def setup(install_all: bool) -> None:
         click.echo(f"Enabling {plugin}...")
         _run_claude("plugin", "install", qualified)
 
+    # Fetch MCP keys and write them to plugin user config. Plugin manifests
+    # resolve ${user_config.mcpKey} in static Authorization headers at MCP
+    # load time — no per-reconnect shell spawn.
+    click.echo("")
+    click.echo("Populating MCP keys...")
+    try:
+        _populate_mcp_keys(plugins)
+    except click.ClickException as e:
+        click.echo(f"  warning: {e.message}", err=True)
+        click.echo("  Run `cass refresh-keys` manually to retry.", err=True)
+
     click.echo("")
     click.echo("Done! Installed plugins:")
     for p in plugins:
@@ -85,4 +97,24 @@ def setup(install_all: bool) -> None:
                 click.echo(f"  - {p}")
 
     click.echo("")
-    click.echo("Next: start Claude Code and the plugins will auto-authenticate via cass.")
+    click.echo("Restart Claude Code to activate plugins.")
+
+
+def _populate_mcp_keys(plugins: list[str]) -> None:
+    from cass.auth import ensure_auth  # noqa: PLC0415 — avoid import cycle on `cass --version`
+    needs_keys = [p for p in plugins if p in PLUGIN_SERVICES]
+    if not needs_keys:
+        return
+    auth = ensure_auth()
+    settings = _load_settings()
+    for plugin in needs_keys:
+        service = PLUGIN_SERVICES[plugin]
+        key = get_service_key(service)
+        if not key:
+            click.echo(f"  creating key for {service}...")
+            key = _fetch_new_key(service, auth)
+            _save_service_key(service, key, auth.get("email", ""))
+        else:
+            click.echo(f"  using cached key for {service}")
+        _write_plugin_option(settings, plugin, "mcpKey", key)
+    _save_settings(settings)

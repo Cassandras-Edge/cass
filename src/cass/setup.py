@@ -102,6 +102,7 @@ def setup(install_all: bool) -> None:
 
 def _populate_mcp_keys(plugins: list[str]) -> None:
     from cass.auth import ensure_auth  # noqa: PLC0415 — avoid import cycle on `cass --version`
+    import httpx  # noqa: PLC0415
     needs_keys = [p for p in plugins if p in PLUGIN_SERVICES]
     if not needs_keys:
         return
@@ -111,9 +112,16 @@ def _populate_mcp_keys(plugins: list[str]) -> None:
         service = PLUGIN_SERVICES[plugin]
         key = get_service_key(service)
         if not key:
-            click.echo(f"  creating key for {service}...")
-            key = _fetch_new_key(service, auth)
-            _save_service_key(service, key, auth.get("email", ""))
+            try:
+                click.echo(f"  creating key for {service}...")
+                key = _fetch_new_key(service, auth)
+                _save_service_key(service, key, auth.get("email", ""))
+            except httpx.HTTPStatusError as e:
+                click.echo(f"  warning: could not provision {service}: {e.response.status_code}", err=True)
+                continue
+            except Exception as e:  # noqa: BLE001
+                click.echo(f"  warning: could not provision {service}: {e}", err=True)
+                continue
         else:
             click.echo(f"  using cached key for {service}")
         _write_plugin_option(settings, plugin, "mcpKey", key)

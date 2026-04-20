@@ -114,17 +114,25 @@ def refresh_keys(force: bool, plugin_filter: str | None) -> None:
 
     settings = _load_settings()
     updated: list[tuple[str, str]] = []
+    failed: list[tuple[str, str]] = []
 
     for plugin, service in plugins.items():
         existing = None if force else get_service_key(service)
         if existing:
-            key = existing
-            source = "cached"
+            key, source = existing, "cached"
         else:
-            click.echo(f"Creating key for {service}...")
-            key = _fetch_new_key(service, auth)
-            _save_service_key(service, key, auth.get("email", ""))
-            source = "new"
+            try:
+                click.echo(f"Creating key for {service}...")
+                key = _fetch_new_key(service, auth)
+                _save_service_key(service, key, auth.get("email", ""))
+                source = "new"
+            except httpx.HTTPStatusError as e:
+                body = (e.response.text or "").strip()[:200]
+                failed.append((plugin, f"{e.response.status_code} {body}"))
+                continue
+            except Exception as e:  # noqa: BLE001
+                failed.append((plugin, str(e)))
+                continue
 
         _write_plugin_option(settings, plugin, "mcpKey", key)
         updated.append((plugin, source))
@@ -135,5 +143,10 @@ def refresh_keys(force: bool, plugin_filter: str | None) -> None:
     click.echo(f"Wrote {len(updated)} key(s) to {SETTINGS_PATH}:")
     for plugin, source in updated:
         click.echo(f"  - {plugin:20s} [{source}]")
+    if failed:
+        click.echo("")
+        click.echo(f"Failed for {len(failed)} plugin(s):", err=True)
+        for plugin, reason in failed:
+            click.echo(f"  - {plugin:20s} {reason}", err=True)
     click.echo("")
     click.echo("Restart Claude Code for plugins to pick up the new config.")

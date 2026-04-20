@@ -30,6 +30,42 @@ def get_service_key(service: str) -> str | None:
         return None
 
 
+def _key_is_alive(key: str) -> bool:
+    """Probe portal→auth to confirm a cached key still exists in auth's DB.
+
+    Cached keys can go stale when the auth service loses the row (PVC reset,
+    portal→auth write previously failed silently, manual deletion, etc.).
+    Re-serving a dead key sends Claude Code's headersHelper a token the MCP
+    server will reject with invalid_token, so we validate before returning.
+
+    Returns True only on an authoritative "valid". On any error (portal down,
+    network blip, auth unreachable) we return True so we don't thrash new
+    keys during transient failures — the MCP server itself is the final gate.
+    """
+    portal = get_portal_url()
+    auth = get_cached_auth()
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if auth:
+        headers["Authorization"] = f"Bearer {auth['key']}"
+        if auth.get("cf_token"):
+            headers["Cookie"] = f"CF_Authorization={auth['cf_token']}"
+    try:
+        resp = httpx.post(
+            f"{portal}/api/keys/validate",
+            headers=headers,
+            json={"key": key},
+            timeout=5,
+        )
+    except httpx.HTTPError:
+        return True  # don't thrash on transient network failures
+    if resp.status_code != 200:
+        return True  # portal error — let the MCP server decide
+    try:
+        return bool(resp.json().get("valid"))
+    except (ValueError, KeyError):
+        return True
+
+
 def _save_service_key(service: str, key: str, email: str) -> None:
     KEYS_DIR.mkdir(parents=True, exist_ok=True)
     path = _key_path(service)
@@ -48,16 +84,23 @@ def ensure_key(service: str, quiet: bool, header: bool) -> None:
       {"Authorization": "Bearer mcp_..."}
     With --quiet, outputs just the key.
     """
-    # Check cache first
+    # Check cache first — but validate against the auth service before
+    # handing it back. A stale cached key would otherwise cause every MCP
+    # connection to fail with invalid_token forever.
     existing = get_service_key(service)
     if existing:
-        if header:
-            click.echo(json.dumps({"Authorization": f"Bearer {existing}"}))
-        elif quiet:
-            click.echo(existing)
-        else:
-            click.echo(f"Key for {service}: {existing[:20]}...")
-        return
+        if _key_is_alive(existing):
+            if header:
+                click.echo(json.dumps({"Authorization": f"Bearer {existing}"}))
+            elif quiet:
+                click.echo(existing)
+            else:
+                click.echo(f"Key for {service}: {existing[:20]}...")
+            return
+        # Stale cache — delete and fall through to re-provision.
+        _key_path(service).unlink(missing_ok=True)
+        if not quiet:
+            click.echo(f"Cached key for {service} is no longer valid — re-provisioning...", err=True)
 
     # Need to create — ensure valid auth (auto-triggers browser login if CF Access expired)
     auth = ensure_auth()

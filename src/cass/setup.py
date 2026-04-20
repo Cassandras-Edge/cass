@@ -12,7 +12,6 @@ from cass.refresh_keys import PLUGIN_SERVICES, _fetch_new_key, _load_settings, _
 
 
 MARKETPLACE_REPO = "Cassandras-Edge/cassandra-marketplace"
-DEFAULT_PLUGINS = ["stopgate", "media-mcp", "market-research", "gemini-mcp"]
 ALL_PLUGINS = [
     "stopgate", "media-mcp", "twitter-mcp", "reddit-mcp", "claudeai-mcp",
     "discord-mcp", "market-research", "gemini-mcp", "perplexity-mcp",
@@ -35,12 +34,11 @@ def _run_claude(*args: str) -> bool:
 
 
 @click.command()
-@click.option("--all", "install_all", is_flag=True, help="Enable all MCP plugins, not just defaults.")
-def setup(install_all: bool) -> None:
+def setup() -> None:
     """Set up Claude Code with the Cassandra marketplace and plugins.
 
-    Registers the marketplace, enables cass-cli and default MCP plugins.
-    Use --all to enable every available plugin.
+    Registers the marketplace and enables every Cassandra plugin. To opt
+    out of a specific plugin afterward, use `claude plugin disable <name>`.
     """
     require_supported_host()
     claude = shutil.which("claude")
@@ -63,11 +61,8 @@ def setup(install_all: bool) -> None:
     except Exception as e:
         click.echo(f"  warning: patched-cli install failed: {e}", err=True)
 
-    # Pick plugins
-    plugins = ALL_PLUGINS if install_all else DEFAULT_PLUGINS
-
-    # Install plugins
-    for plugin in plugins:
+    # Install every plugin
+    for plugin in ALL_PLUGINS:
         qualified = f"{plugin}@cassandra-plugins"
         click.echo(f"Enabling {plugin}...")
         _run_claude("plugin", "install", qualified)
@@ -78,23 +73,15 @@ def setup(install_all: bool) -> None:
     click.echo("")
     click.echo("Populating MCP keys...")
     try:
-        _populate_mcp_keys(plugins)
+        _populate_mcp_keys(ALL_PLUGINS)
     except click.ClickException as e:
         click.echo(f"  warning: {e.message}", err=True)
         click.echo("  Run `cass refresh-keys` manually to retry.", err=True)
 
     click.echo("")
     click.echo("Done! Installed plugins:")
-    for p in plugins:
+    for p in ALL_PLUGINS:
         click.echo(f"  - {p}")
-
-    if not install_all:
-        remaining = [p for p in ALL_PLUGINS if p not in plugins]
-        if remaining:
-            click.echo("")
-            click.echo("More plugins available (install with --all or individually):")
-            for p in remaining:
-                click.echo(f"  - {p}")
 
     click.echo("")
     click.echo("Restart Claude Code to activate plugins.")

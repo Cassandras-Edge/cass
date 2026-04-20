@@ -8,12 +8,20 @@ import shutil
 import stat
 import sys
 import tempfile
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
 import click
 import httpx
 
 REPO = "Cassandras-Edge/cass"
-CURRENT_VERSION = "0.6.2"
+
+# Read from package metadata so releases don't drift from pyproject.toml.
+# PyInstaller onefile builds include dist-info when the wheel is installed
+# before the build (release.yml does `pip install -e .` first).
+try:
+    CURRENT_VERSION = _pkg_version("cass")
+except PackageNotFoundError:
+    CURRENT_VERSION = "0.0.0-dev"
 
 
 def _detect_target() -> str:

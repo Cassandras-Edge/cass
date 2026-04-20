@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
+from pathlib import Path
 
 import click
 
 from cass.patched_cli import _install_prebuilt, require_supported_host
 from cass.refresh_keys import PLUGIN_SERVICES, _fetch_new_key, _load_settings, _save_service_key, _save_settings, _write_plugin_option, get_service_key
+
+
+INSTALLED_PLUGINS_PATH = Path.home() / ".claude" / "plugins" / "installed_plugins.json"
 
 
 MARKETPLACE_REPO = "Cassandras-Edge/cassandra-marketplace"
@@ -45,9 +50,10 @@ def setup() -> None:
     if not claude:
         raise click.ClickException("claude CLI not found in PATH. Install Claude Code first.")
 
-    # Add marketplace
+    # Add marketplace (idempotent) + refresh its cache so we see latest versions.
     click.echo("Adding Cassandra marketplace...")
     _run_claude("plugin", "marketplace", "add", MARKETPLACE_REPO)
+    _run_claude("plugin", "marketplace", "update", "cassandra-plugins")
 
     # Install the patched CLI at ~/.local/bin/claude-patched — required by
     # stopgate (and any future plugin that needs `claude --bare` + OAuth).
@@ -61,11 +67,18 @@ def setup() -> None:
     except Exception as e:
         click.echo(f"  warning: patched-cli install failed: {e}", err=True)
 
-    # Install every plugin
+    # Install new plugins, update existing ones. `claude plugin install` does
+    # not upgrade an already-installed plugin — we have to route to `update`
+    # based on current install state.
+    installed = _read_installed_plugins()
     for plugin in ALL_PLUGINS:
         qualified = f"{plugin}@cassandra-plugins"
-        click.echo(f"Enabling {plugin}...")
-        _run_claude("plugin", "install", qualified)
+        if qualified in installed:
+            click.echo(f"Updating {plugin}...")
+            _run_claude("plugin", "update", qualified)
+        else:
+            click.echo(f"Enabling {plugin}...")
+            _run_claude("plugin", "install", qualified)
 
     # Fetch MCP keys and write them to plugin user config. Plugin manifests
     # resolve ${user_config.mcpKey} in static Authorization headers at MCP
@@ -85,6 +98,16 @@ def setup() -> None:
 
     click.echo("")
     click.echo("Restart Claude Code to activate plugins.")
+
+
+def _read_installed_plugins() -> set[str]:
+    if not INSTALLED_PLUGINS_PATH.exists():
+        return set()
+    try:
+        data = json.loads(INSTALLED_PLUGINS_PATH.read_text())
+        return set(data.get("plugins", {}).keys())
+    except json.JSONDecodeError:
+        return set()
 
 
 def _populate_mcp_keys(plugins: list[str]) -> None:

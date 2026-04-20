@@ -1,4 +1,4 @@
-"""Self-update — download latest cass binary from GitHub releases."""
+"""Self-update — download cass binary from GitHub releases."""
 
 from __future__ import annotations
 
@@ -51,10 +51,103 @@ def _get_latest_release() -> dict:
     return resp.json()
 
 
+def _get_release_by_tag(tag: str) -> dict:
+    resp = httpx.get(f"https://api.github.com/repos/{REPO}/releases/tags/{tag}", timeout=15)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _resolve_release(target: str) -> dict:
+    """Resolve 'latest' | 'stable' | '<version>' | 'v<version>' to a GitHub release."""
+    if target in ("latest", "stable"):
+        return _get_latest_release()
+    tag = target if target.startswith("v") else f"v{target}"
+    return _get_release_by_tag(tag)
+
+
+def _install_release(release: dict) -> str:
+    """Download release binary for the current platform and replace the
+    on-disk cass. Returns the installed version string."""
+    version = release["tag_name"].lstrip("v")
+    target = _detect_target()
+    asset_name = f"cass-{target}"
+    if "windows" in target:
+        asset_name += ".exe"
+
+    url = next(
+        (a["browser_download_url"] for a in release.get("assets", []) if a["name"] == asset_name),
+        None,
+    )
+    if not url:
+        raise click.ClickException(f"No binary found for {target} in release {version}")
+
+    click.echo(f"Downloading {asset_name}...")
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".tmp") as tmp:
+        tmp_path = tmp.name
+        with httpx.stream("GET", url, follow_redirects=True, timeout=60) as resp:
+            resp.raise_for_status()
+            for chunk in resp.iter_bytes():
+                tmp.write(chunk)
+
+    current_bin = shutil.which("cass") or sys.executable
+    plugin_data = os.environ.get("CLAUDE_PLUGIN_DATA")
+    target_path = os.path.join(plugin_data, "bin", "cass") if plugin_data else current_bin
+
+    try:
+        os.replace(tmp_path, target_path)
+        os.chmod(target_path, os.stat(target_path).st_mode | stat.S_IEXEC)
+    except OSError:
+        # Can't replace in-place (Windows locks, etc.) — try backup approach
+        backup = target_path + ".bak"
+        try:
+            os.replace(target_path, backup)
+            os.replace(tmp_path, target_path)
+            os.chmod(target_path, os.stat(target_path).st_mode | stat.S_IEXEC)
+            os.unlink(backup)
+        except OSError as e:
+            raise click.ClickException(f"Failed to replace binary: {e}") from e
+
+    return version
+
+
+@click.command()
+@click.argument("target", default="latest", required=False)
+@click.option("--force", is_flag=True, help="Reinstall even if already at target version.")
+def install(target: str, force: bool) -> None:
+    """Install cass — latest, stable, or a specific version.
+
+    Mirrors `claude install [target]` UX. Examples:
+
+        cass install              # install latest
+        cass install latest       # same
+        cass install 0.6.8        # install v0.6.8
+        cass install v0.6.8       # same
+    """
+    click.echo(f"Current version: {CURRENT_VERSION}")
+    try:
+        release = _resolve_release(target)
+    except httpx.HTTPError as e:
+        raise click.ClickException(f"Failed to resolve release '{target}': {e}") from e
+
+    desired = release["tag_name"].lstrip("v")
+    click.echo(f"Target version:  {desired}")
+
+    if desired == CURRENT_VERSION and not force:
+        click.echo("Already at target version. Use --force to reinstall.")
+        return
+
+    installed = _install_release(release)
+    click.echo(f"Installed: {CURRENT_VERSION} → {installed}")
+
+
 @click.command()
 @click.option("--check", is_flag=True, help="Check for updates without installing.")
 def update(check: bool) -> None:
-    """Update cass to the latest version."""
+    """Update cass to the latest version.
+
+    Thin alias for `cass install latest`. Kept for muscle memory.
+    """
     click.echo(f"Current version: {CURRENT_VERSION}")
 
     try:
@@ -73,55 +166,8 @@ def update(check: bool) -> None:
         click.echo(f"Update available: {CURRENT_VERSION} → {latest}")
         return
 
-    target = _detect_target()
-    asset_name = f"cass-{target}"
-    if "windows" in target:
-        asset_name += ".exe"
-
-    # Find the download URL
-    url = None
-    for asset in release.get("assets", []):
-        if asset["name"] == asset_name:
-            url = asset["browser_download_url"]
-            break
-
-    if not url:
-        raise click.ClickException(f"No binary found for {target} in release {latest}")
-
-    click.echo(f"Downloading {asset_name}...")
-
-    # Download to temp file
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".tmp") as tmp:
-        tmp_path = tmp.name
-        with httpx.stream("GET", url, follow_redirects=True, timeout=60) as resp:
-            resp.raise_for_status()
-            for chunk in resp.iter_bytes():
-                tmp.write(chunk)
-
-    # Replace current binary
-    current_bin = shutil.which("cass") or sys.executable
-    # If running from a uv tool install, update the plugin data dir instead
-    plugin_data = os.environ.get("CLAUDE_PLUGIN_DATA")
-    if plugin_data:
-        target_path = os.path.join(plugin_data, "bin", "cass")
-    else:
-        target_path = current_bin
-
-    try:
-        os.replace(tmp_path, target_path)
-        os.chmod(target_path, os.stat(target_path).st_mode | stat.S_IEXEC)
-    except OSError:
-        # Can't replace in-place (Windows locks, etc.) — try backup approach
-        backup = target_path + ".bak"
-        try:
-            os.replace(target_path, backup)
-            os.replace(tmp_path, target_path)
-            os.chmod(target_path, os.stat(target_path).st_mode | stat.S_IEXEC)
-            os.unlink(backup)
-        except OSError as e:
-            raise click.ClickException(f"Failed to replace binary: {e}") from e
-
-    click.echo(f"Updated: {CURRENT_VERSION} → {latest}")
+    installed = _install_release(release)
+    click.echo(f"Updated: {CURRENT_VERSION} → {installed}")
 
 
 def auto_update_check() -> None:
@@ -135,40 +181,8 @@ def auto_update_check() -> None:
         latest = release["tag_name"].lstrip("v")
         if latest == CURRENT_VERSION:
             return
-
-        target = _detect_target()
-        asset_name = f"cass-{target}"
-        if "windows" in target:
-            asset_name += ".exe"
-
-        url = None
-        for asset in release.get("assets", []):
-            if asset["name"] == asset_name:
-                url = asset["browser_download_url"]
-                break
-        if not url:
-            return
-
         click.echo(f"Updating cass {CURRENT_VERSION} → {latest}...", err=True)
-
-        import tempfile  # noqa: PLC0415
-
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".tmp") as tmp:
-            tmp_path = tmp.name
-            with httpx.stream("GET", url, follow_redirects=True, timeout=60) as resp:
-                resp.raise_for_status()
-                for chunk in resp.iter_bytes():
-                    tmp.write(chunk)
-
-        current_bin = shutil.which("cass") or sys.executable
-        plugin_data = os.environ.get("CLAUDE_PLUGIN_DATA")
-        if plugin_data:
-            target_path = os.path.join(plugin_data, "bin", "cass")
-        else:
-            target_path = current_bin
-
-        os.replace(tmp_path, target_path)
-        os.chmod(target_path, os.stat(target_path).st_mode | stat.S_IEXEC)
+        _install_release(release)
         click.echo(f"Updated to {latest}.", err=True)
     except Exception:  # noqa: BLE001
         pass  # never break the user's command

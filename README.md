@@ -22,6 +22,8 @@ Make sure `~/.local/bin` is in your PATH.
 ```bash
 cass login    # opens browser, authenticates via Google OAuth
 cass whoami   # verify your identity
+cass codex setup   # preferred Codex setup path
+cass claude setup  # preferred Claude setup path
 ```
 
 ## Commands
@@ -37,12 +39,21 @@ cass whoami   # verify your identity
 | `cass keys create SERVICE NAME` | Create a new MCP key |
 | `cass keys validate KEY` | Validate an MCP key |
 | `cass keys delete KEY` | Delete an MCP key |
+| `cass refresh-keys` | Refresh Claude plugin MCP keys in `~/.claude/settings.json` |
+| `cass setup` | Set up Claude plugins and/or Codex MCP servers |
+| `cass codex setup` | Set up Codex MCP servers and Codex auth env wiring |
+| `cass claude setup` | Set up the Cassandra Claude marketplace plugins |
 | `cass update` | Update to the latest version |
 
 ## Auto-update
 
 `cass` checks for updates on every run (at most once per hour). Set `CASS_NO_AUTO_UPDATE=1` to disable.
 
-## Claude Code Plugin
+## Claude Code + Codex
 
-If you use Claude Code with the Cassandra marketplace, the `cass-cli` plugin adds `cass` to PATH and auto-installs it. MCP plugins use `cass ensure-key` via `headersHelper` to auto-provision auth keys.
+`cass` now supports both client flows:
+
+- Claude Code: `cass claude setup` registers the Cassandra marketplace, installs plugins, and populates plugin MCP keys.
+- Codex: `cass codex setup` provisions Cassandra MCP keys, registers the remote MCP servers with `codex mcp add`, and writes bearer-token exports to `~/.config/cass/codex-mcp.env`.
+
+For Codex, source the generated env file before launching Codex so the configured `bearer_token_env_var` entries resolve correctly.

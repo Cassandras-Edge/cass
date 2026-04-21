@@ -80,7 +80,8 @@ def _save_service_key(service: str, key: str, email: str) -> None:
 def ensure_key(service: str, quiet: bool, header: bool) -> None:
     """Ensure an MCP key exists for SERVICE. Creates one if needed.
 
-    With --header, outputs JSON headers for Claude Code headersHelper:
+    With --header, outputs JSON headers for MCP clients that accept a header map
+    (including Claude Code's headersHelper):
       {"Authorization": "Bearer mcp_..."}
     With --quiet, outputs just the key.
     """

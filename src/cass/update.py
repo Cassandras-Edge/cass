@@ -144,10 +144,15 @@ def install(target: str, force: bool) -> None:
 @click.command()
 @click.option("--check", is_flag=True, help="Only report what would be updated, don't install.")
 @click.option("--binary-only", is_flag=True, help="Update the cass binary only; skip plugins/patched-cli/keys.")
-def update(check: bool, binary_only: bool) -> None:
-    """Update everything — the cass binary, the patched Claude CLI, all
-    Cassandra plugins, and MCP keys. Run this periodically to pull the
-    latest of everything.
+@click.option(
+    "--client",
+    type=click.Choice(["auto", "claude", "codex", "both"]),
+    default="auto",
+    show_default=True,
+    help="Which client integrations to update after the binary update.",
+)
+def update(check: bool, binary_only: bool, client: str) -> None:
+    """Update everything — the cass binary plus configured Claude/Codex integrations.
     """
     click.echo(f"Current version: {CURRENT_VERSION}")
 
@@ -179,9 +184,9 @@ def update(check: bool, binary_only: bool) -> None:
     # cli.py → update.py (at --version time) and setup.py → auth.py.
     from cass.setup import sync_platform  # noqa: PLC0415
     click.echo("")
-    sync_platform(install_missing=False)
+    sync_platform(install_missing=False, client=client)
     click.echo("")
-    click.echo("Update complete. Restart Claude Code to pick up new plugin versions.")
+    click.echo("Update complete. Restart your configured client(s) to pick up the changes.")
 
 
 def auto_update_check() -> None:

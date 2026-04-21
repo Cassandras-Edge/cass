@@ -12,6 +12,8 @@ PORTAL_URL = "https://portal.cassandrasedge.com"
 # Look for env vars first, then fall back to reading env files from cassandra-stack/env/
 _STACK_ROOT = Path(__file__).resolve().parents[3]  # cass-cli/src/cass -> cassandra-stack
 _ACL_ENV = _STACK_ROOT / "env" / "acl.env"
+_PORTAL_ENV = _STACK_ROOT / "env" / "portal.env"
+_SCHWAB_ENV = _STACK_ROOT / "env" / "schwab.local.env"
 
 
 def _read_env_file(path: Path) -> dict[str, str]:
@@ -29,12 +31,19 @@ def _read_env_file(path: Path) -> dict[str, str]:
     return vals
 
 
+def _read_local_env() -> dict[str, str]:
+    merged: dict[str, str] = {}
+    for path in (_ACL_ENV, _PORTAL_ENV, _SCHWAB_ENV):
+        merged.update(_read_env_file(path))
+    return merged
+
+
 def get_auth_url() -> str:
     """Auth service URL — only available when AUTH_SECRET is set (cluster/local)."""
     url = os.environ.get("AUTH_URL")
     if url:
         return url
-    return _read_env_file(_ACL_ENV).get("AUTH_URL", "https://auth.cassandrasedge.com")
+    return _read_local_env().get("AUTH_URL", "https://auth.cassandrasedge.com")
 
 
 def get_auth_secret() -> str | None:
@@ -42,15 +51,17 @@ def get_auth_secret() -> str | None:
     secret = os.environ.get("AUTH_SECRET")
     if secret:
         return secret
-    return _read_env_file(_ACL_ENV).get("AUTH_SECRET")
+    return _read_local_env().get("AUTH_SECRET")
 
 
 def get_default_email() -> str:
-    return os.environ.get("CASS_EMAIL", "andrew@raftesalo.net")
+    local = _read_local_env()
+    return os.environ.get("CASS_EMAIL") or local.get("CASS_EMAIL") or local.get("DEFAULT_USER_EMAIL") or "andrew@raftesalo.net"
 
 
 def get_portal_url() -> str:
-    return os.environ.get("CASS_PORTAL_URL", PORTAL_URL)
+    local = _read_local_env()
+    return os.environ.get("CASS_PORTAL_URL") or local.get("CASS_PORTAL_URL") or PORTAL_URL
 
 
 def _is_reachable(url: str) -> bool:

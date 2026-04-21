@@ -16,6 +16,7 @@ from cass.ensure import ensure_key
 from cass.keys import keys
 from cass.patched_cli import patched_cli
 from cass.refresh_keys import refresh_keys
+from cass.schwab import schwab
 from cass.setup import claude, codex, setup
 from cass.update import install, update, auto_update_check, CURRENT_VERSION
 
@@ -66,6 +67,7 @@ main.add_command(keys)
 main.add_command(patched_cli)
 main.add_command(install)
 main.add_command(refresh_keys)
+main.add_command(schwab)
 main.add_command(setup)
 main.add_command(codex)
 main.add_command(claude)

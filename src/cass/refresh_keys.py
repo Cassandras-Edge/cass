@@ -38,6 +38,7 @@ PLUGIN_SERVICES: dict[str, str] = {
     "perplexity-mcp": "perplexity-mcp",
     "gateway-mcp": "gateway",
     "routines-mcp": "routines",
+    "schwab-mcp": "schwab-mcp",
 }
 
 

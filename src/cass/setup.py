@@ -19,11 +19,25 @@ CODEX_ENV_PATH = Path.home() / ".config" / "cass" / "codex-mcp.env"
 
 
 MARKETPLACE_REPO = "Cassandras-Edge/cassandra-marketplace"
-ALL_PLUGINS = [
+
+# Plugins installed by default on `cass setup`. Safe for any user — no
+# per-user credentials, no owner-gated ACLs, useful broadly.
+DEFAULT_PLUGINS = [
     "stopgate", "media-mcp", "twitter-mcp", "reddit-mcp", "claudeai-mcp",
     "discord-mcp", "market-research", "gemini-mcp", "perplexity-mcp",
-    "tradingview-mcp", "routines-mcp",
+    "routines-mcp",
 ]
+
+# Opt-in plugins. Each has a specific reason to be off by default
+# (owner-only ACL, per-user brokerage auth, etc.). Install via
+# `cass setup --with <name>` or `cass setup --with all`.
+OPTIONAL_PLUGINS = [
+    "tradingview-mcp",  # owner-only ACL (NekoKeys Pro account)
+    "schwab-mcp",       # per-user Schwab OAuth — run `cass auth schwab` after
+]
+
+ALL_PLUGINS = DEFAULT_PLUGINS + OPTIONAL_PLUGINS
+
 CODEX_SERVERS: dict[str, dict[str, str]] = {
     "yt-mcp": {"service": "yt-mcp", "subdomain": "youtube"},
     "discord-mcp": {"service": "discord-mcp", "subdomain": "discord-mcp"},
@@ -36,7 +50,33 @@ CODEX_SERVERS: dict[str, dict[str, str]] = {
     "gateway": {"service": "gateway", "subdomain": "gateway"},
     "tradingview-mcp": {"service": "tradingview-mcp", "subdomain": "tradingview-mcp"},
     "routines": {"service": "routines", "subdomain": "routines-mcp"},
+    "schwab-mcp": {"service": "schwab-mcp", "subdomain": "schwab"},
 }
+# Same default/optional split applies to Codex servers.
+DEFAULT_CODEX_SERVERS = [
+    "yt-mcp", "discord-mcp", "twitter-mcp", "market-research", "reddit-mcp",
+    "claudeai-mcp", "gemini-mcp", "perplexity-mcp", "gateway", "routines",
+]
+OPTIONAL_CODEX_SERVERS = ["tradingview-mcp", "schwab-mcp"]
+
+
+def _resolve_opt_ins(includes: tuple[str, ...], optional_pool: list[str]) -> set[str]:
+    """Expand --with values into a concrete set of optional plugins to enable."""
+    selected: set[str] = set()
+    for raw in includes:
+        for piece in raw.split(","):
+            name = piece.strip()
+            if not name:
+                continue
+            if name == "all":
+                selected.update(optional_pool)
+                continue
+            if name not in optional_pool:
+                raise click.ClickException(
+                    f"Unknown optional plugin '{name}'. Known: {', '.join(optional_pool)}, or 'all'."
+                )
+            selected.add(name)
+    return selected
 
 
 def _run_claude(*args: str) -> bool:
@@ -80,20 +120,25 @@ def _resolve_clients(client: str) -> list[str]:
     return clients
 
 
-def sync_platform(install_missing: bool, client: str = "auto") -> None:
+def sync_platform(
+    install_missing: bool,
+    client: str = "auto",
+    opt_in_claude: set[str] | None = None,
+    opt_in_codex: set[str] | None = None,
+) -> None:
     """Refresh Cassandra integrations for Claude Code, Codex, or both."""
     clients = _resolve_clients(client)
 
     if "claude" in clients:
-        _sync_claude(install_missing)
+        _sync_claude(install_missing, opt_in_claude or set())
 
     if "codex" in clients:
         if "claude" in clients:
             click.echo("")
-        _sync_codex(install_missing)
+        _sync_codex(install_missing, opt_in_codex or set())
 
 
-def _sync_claude(install_missing: bool) -> None:
+def _sync_claude(install_missing: bool, opt_in: set[str]) -> None:
     require_supported_host()
 
     click.echo("Refreshing Claude marketplace...")
@@ -110,16 +155,30 @@ def _sync_claude(install_missing: bool) -> None:
 
     installed = _read_installed_plugins()
     touched: list[str] = []
+    skipped_optional: list[str] = []
     for plugin in ALL_PLUGINS:
         qualified = f"{plugin}@cassandra-plugins"
-        if qualified in installed:
+        is_optional = plugin in OPTIONAL_PLUGINS
+        already_installed = qualified in installed
+
+        if already_installed:
+            # Keep what the user already chose up to date, always.
             click.echo(f"Updating {plugin}...")
             _run_claude("plugin", "update", qualified)
             touched.append(plugin)
+        elif is_optional and plugin not in opt_in:
+            skipped_optional.append(plugin)
         elif install_missing:
             click.echo(f"Enabling {plugin}...")
             _run_claude("plugin", "install", qualified)
             touched.append(plugin)
+
+    if skipped_optional:
+        click.echo("")
+        click.echo(
+            "Skipped optional: " + ", ".join(skipped_optional)
+            + " — enable with `cass setup --with <name>` (or `--with all`)."
+        )
 
     if not touched:
         click.echo("")
@@ -202,17 +261,22 @@ def _upsert_codex_server(name: str, url: str, env_var: str) -> None:
     )
 
 
-def _sync_codex(install_missing: bool) -> None:
+def _sync_codex(install_missing: bool, opt_in: set[str]) -> None:
     click.echo("Syncing Codex MCP servers...")
 
     from cass.auth import ensure_auth  # noqa: PLC0415
 
     touched: list[str] = []
+    skipped_optional: list[str] = []
     env_updates: dict[str, str] = {}
     auth: dict | None = None
 
     for name, meta in CODEX_SERVERS.items():
         exists = _codex_has_server(name)
+        is_optional = name in OPTIONAL_CODEX_SERVERS
+        if not exists and is_optional and name not in opt_in:
+            skipped_optional.append(name)
+            continue
         if not exists and not install_missing:
             continue
 
@@ -233,6 +297,13 @@ def _sync_codex(install_missing: bool) -> None:
         _upsert_codex_server(name, _codex_url(meta["subdomain"]), env_var)
         touched.append(name)
 
+    if skipped_optional:
+        click.echo("")
+        click.echo(
+            "Skipped optional: " + ", ".join(skipped_optional)
+            + " — enable with `cass setup --client codex --with <name>`."
+        )
+
     if not touched:
         click.echo("")
         click.echo("No Cassandra Codex MCP servers configured. Run `cass setup --client codex` to add them.")
@@ -246,9 +317,12 @@ def _sync_codex(install_missing: bool) -> None:
     click.echo("Source that file before launching Codex so the MCP auth env vars are available.")
 
 
-def _run_setup_for_clients(client: str) -> None:
+def _run_setup_for_clients(client: str, includes: tuple[str, ...] = ()) -> None:
     """Shared setup flow for one or more client integrations."""
     clients = _resolve_clients(client)
+
+    opt_in_claude = _resolve_opt_ins(includes, OPTIONAL_PLUGINS)
+    opt_in_codex = _resolve_opt_ins(includes, OPTIONAL_CODEX_SERVERS)
 
     if "claude" in clients:
         click.echo("Adding Cassandra marketplace...")
@@ -256,13 +330,23 @@ def _run_setup_for_clients(client: str) -> None:
         if "codex" in clients:
             click.echo("")
 
-    sync_platform(install_missing=True, client=client)
+    sync_platform(
+        install_missing=True,
+        client=client,
+        opt_in_claude=opt_in_claude,
+        opt_in_codex=opt_in_codex,
+    )
 
     click.echo("")
     if "claude" in clients:
-        click.echo("Claude plugins:")
-        for p in ALL_PLUGINS:
+        click.echo("Claude plugins (default):")
+        for p in DEFAULT_PLUGINS:
             click.echo(f"  - {p}")
+        if OPTIONAL_PLUGINS:
+            click.echo("Optional (opt in with --with <name>):")
+            for p in OPTIONAL_PLUGINS:
+                marker = "✓" if p in opt_in_claude else " "
+                click.echo(f"  {marker} {p}")
         click.echo("")
         click.echo("Restart Claude Code to activate plugins.")
     if "codex" in clients:
@@ -279,14 +363,29 @@ def _run_setup_for_clients(client: str) -> None:
     show_default=True,
     help="Which client integrations to set up.",
 )
-def setup(client: str) -> None:
+@click.option(
+    "--with",
+    "includes",
+    multiple=True,
+    metavar="NAME",
+    help=(
+        "Enable an optional plugin by name (repeatable, or comma-separated). "
+        "Use `all` to enable every optional plugin. "
+        "Currently optional: " + ", ".join(OPTIONAL_PLUGINS) + "."
+    ),
+)
+def setup(client: str, includes: tuple[str, ...]) -> None:
     """First-time Cassandra setup for Claude Code, Codex, or both.
 
     `cass setup` is idempotent. On Claude it registers the marketplace and
     enables Cassandra plugins. On Codex it provisions MCP keys, writes a local
     env file, and registers the Cassandra MCP servers with `codex mcp add`.
+
+    Default-installed plugins: every safe-for-anyone service. Optional plugins
+    are opt-in (e.g. `schwab-mcp` needs per-user Schwab auth). Already-
+    installed optional plugins are always kept up to date.
     """
-    _run_setup_for_clients(client)
+    _run_setup_for_clients(client, includes)
 
 
 @click.group()
@@ -295,9 +394,14 @@ def codex() -> None:
 
 
 @codex.command("setup")
-def codex_setup() -> None:
+@click.option(
+    "--with", "includes", multiple=True, metavar="NAME",
+    help="Enable an optional server by name (repeatable, or comma-separated). "
+         "Use `all` for every optional server.",
+)
+def codex_setup(includes: tuple[str, ...]) -> None:
     """Set up Codex MCP servers and auth for Cassandra services."""
-    _run_setup_for_clients("codex")
+    _run_setup_for_clients("codex", includes)
 
 
 @click.group()

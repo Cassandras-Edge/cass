@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 from pathlib import Path
 
@@ -12,6 +13,10 @@ from schwab.auth import client_from_login_flow, client_from_manual_flow
 
 from cass.auth import ensure_auth
 from cass.config import get_portal_url
+
+# States where the user needs to run `cass auth schwab` interactively.
+# `degraded` is transient (backend retrying) — leave it alone.
+_REAUTH_STATES = {"disabled", "reauth_required"}
 
 
 def _portal_headers() -> dict[str, str]:
@@ -96,3 +101,62 @@ def auth_schwab(session_id: str, manual: bool) -> None:
         status_data = session_status.json()
         click.echo(f"Current state: {status_data['state']}")
         click.echo(status_data["message"])
+
+
+def _fetch_schwab_status() -> dict | None:
+    """Return the broker's session status dict, or None if the portal is unreachable."""
+    portal = get_portal_url()
+    try:
+        headers = _portal_headers()
+    except Exception:  # noqa: BLE001 — no creds cached, treat as unconfigured
+        return None
+    try:
+        with httpx.Client(timeout=10.0, headers=headers) as client:
+            resp = client.get(f"{portal}/api/schwab/status")
+            if resp.status_code >= 400:
+                return None
+            return resp.json()
+    except httpx.HTTPError:
+        return None
+
+
+@auth.command("status")
+@click.option("--service", "services", multiple=True, help="Limit to specific services (default: all).")
+@click.option("--if-needed", is_flag=True, help="Run the re-auth flow inline when a service is not healthy.")
+@click.option("--quiet", is_flag=True, help="No output on healthy sessions — only print on problems.")
+def auth_status(services: tuple[str, ...], if_needed: bool, quiet: bool) -> None:
+    """Check upstream-service auth state. Exits non-zero if anything needs attention.
+
+    Designed for a Claude Code SessionStart hook:
+
+      \b
+      { "hooks": { "SessionStart": [{ "hooks": [
+          { "type": "command",
+            "command": "cass auth status --if-needed --quiet" }
+      ] }] } }
+    """
+    selected = {s.lower() for s in services} if services else None
+
+    if selected is None or "schwab" in selected:
+        status = _fetch_schwab_status()
+        if status is None:
+            if not quiet:
+                click.echo("schwab: unknown (portal unreachable or not logged in)")
+            sys.exit(1)
+        state = status.get("state", "unknown")
+        message = status.get("message", "")
+        if state == "healthy":
+            if not quiet:
+                click.echo(f"schwab: healthy — {message}")
+        elif state in _REAUTH_STATES:
+            click.echo(f"schwab: {state} — {message}", err=True)
+            if if_needed:
+                click.echo("Running `cass auth schwab`…", err=True)
+                ctx = click.get_current_context()
+                ctx.invoke(auth_schwab, session_id="", manual=False)
+                return
+            sys.exit(1)
+        else:
+            # degraded / refresh_due / unknown — warn but don't force re-auth
+            click.echo(f"schwab: {state} — {message}", err=True)
+            sys.exit(1)

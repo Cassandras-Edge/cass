@@ -30,14 +30,14 @@ def _load_token(path: Path) -> dict:
 
 
 @click.group()
-def schwab() -> None:
-    """Manage Schwab authentication and session recovery."""
+def auth() -> None:
+    """Authenticate against upstream services (Schwab, …)."""
 
 
-@schwab.command()
+@auth.command("schwab")
 @click.option("--session-id", default="", help="Existing portal connect session id.")
 @click.option("--manual", is_flag=True, help="Use schwab-py's manual flow instead of opening a local browser.")
-def auth(session_id: str, manual: bool) -> None:
+def auth_schwab(session_id: str, manual: bool) -> None:
     """Authenticate Schwab using schwab-py's normal OAuth flow and upload the token."""
     portal = get_portal_url()
     headers = _portal_headers()

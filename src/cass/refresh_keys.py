@@ -24,7 +24,8 @@ from cass.ensure import _save_service_key, get_service_key
 MARKETPLACE = "cassandra-plugins"
 SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 
-# Plugin name → cass service name. Most match; two legacy mismatches.
+# Plugin name → cass service name. Most match; a few legacy mismatches
+# (media-mcp → yt-mcp, gateway-mcp → gateway, routines-mcp → routines).
 PLUGIN_SERVICES: dict[str, str] = {
     "tradingview-mcp": "tradingview-mcp",
     "twitter-mcp": "twitter-mcp",
@@ -36,6 +37,7 @@ PLUGIN_SERVICES: dict[str, str] = {
     "gemini-mcp": "gemini-mcp",
     "perplexity-mcp": "perplexity-mcp",
     "gateway-mcp": "gateway",
+    "routines-mcp": "routines",
 }
 
 

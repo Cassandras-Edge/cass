@@ -20,7 +20,7 @@ MARKETPLACE_REPO = "Cassandras-Edge/cassandra-marketplace"
 ALL_PLUGINS = [
     "stopgate", "media-mcp", "twitter-mcp", "reddit-mcp", "claudeai-mcp",
     "discord-mcp", "market-research", "gemini-mcp", "perplexity-mcp",
-    "tradingview-mcp",
+    "tradingview-mcp", "routines-mcp",
 ]
 
 

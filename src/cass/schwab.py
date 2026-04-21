@@ -48,16 +48,21 @@ def auth_schwab(session_id: str, manual: bool) -> None:
     headers = _portal_headers()
 
     with httpx.Client(timeout=60.0, headers=headers) as client:
-        if not session_id:
-            bootstrap = client.post(f"{portal}/api/schwab/bootstrap")
-            bootstrap.raise_for_status()
-            data = bootstrap.json()
-            session_id = data["session_id"]
-        else:
+        if session_id:
             bootstrap = client.post(f"{portal}/api/schwab/bootstrap?session_id={session_id}")
-            bootstrap.raise_for_status()
-            data = bootstrap.json()
-
+        else:
+            bootstrap = client.post(f"{portal}/api/schwab/bootstrap")
+        if bootstrap.status_code >= 400:
+            raise click.ClickException(
+                f"Portal bootstrap failed ({bootstrap.status_code}): {bootstrap.text}"
+            )
+        data = bootstrap.json()
+        for field in ("session_id", "callback_url", "app_key", "app_secret"):
+            if not data.get(field):
+                raise click.ClickException(
+                    f"Portal bootstrap returned incomplete response (missing {field}): {data}"
+                )
+        session_id = data["session_id"]
         callback_url = data["callback_url"]
         app_key = data["app_key"]
         app_secret = data["app_secret"]

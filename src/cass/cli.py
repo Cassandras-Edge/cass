@@ -13,6 +13,7 @@ from cass.auth import login, logout, whoami
 from cass.cookies import cookies
 from cass.discord import discord
 from cass.ensure import ensure_key
+from cass.image import image, image_mcp
 from cass.keys import keys
 from cass.patched_cli import patched_cli
 from cass.refresh_keys import refresh_keys
@@ -63,6 +64,8 @@ main.add_command(whoami)
 main.add_command(cookies)
 main.add_command(discord)
 main.add_command(ensure_key)
+main.add_command(image)
+main.add_command(image_mcp)
 main.add_command(keys)
 main.add_command(patched_cli)
 main.add_command(install)

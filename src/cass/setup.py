@@ -14,7 +14,6 @@ from cass.patched_cli import _install_prebuilt, require_supported_host
 from cass.refresh_keys import PLUGIN_SERVICES, _fetch_new_key, _load_settings, _save_service_key, _save_settings, _write_plugin_option, get_service_key
 
 
-INSTALLED_PLUGINS_PATH = Path.home() / ".claude" / "plugins" / "installed_plugins.json"
 CODEX_ENV_PATH = Path.home() / ".config" / "cass" / "codex-mcp.env"
 
 
@@ -125,12 +124,13 @@ def sync_platform(
     client: str = "auto",
     opt_in_claude: set[str] | None = None,
     opt_in_codex: set[str] | None = None,
+    scope: str = "project",
 ) -> None:
     """Refresh Cassandra integrations for Claude Code, Codex, or both."""
     clients = _resolve_clients(client)
 
     if "claude" in clients:
-        _sync_claude(install_missing, opt_in_claude or set())
+        _sync_claude(install_missing, opt_in_claude or set(), scope=scope)
 
     if "codex" in clients:
         if "claude" in clients:
@@ -138,10 +138,10 @@ def sync_platform(
         _sync_codex(install_missing, opt_in_codex or set())
 
 
-def _sync_claude(install_missing: bool, opt_in: set[str]) -> None:
+def _sync_claude(install_missing: bool, opt_in: set[str], scope: str = "project") -> None:
     require_supported_host()
 
-    click.echo("Refreshing Claude marketplace...")
+    click.echo(f"Refreshing Claude marketplace (scope: {scope})...")
     _run_claude("plugin", "marketplace", "update", "cassandra-plugins")
 
     click.echo("")
@@ -153,7 +153,7 @@ def _sync_claude(install_missing: bool, opt_in: set[str]) -> None:
     except Exception as e:
         click.echo(f"  warning: patched-cli install failed: {e}", err=True)
 
-    installed = _read_installed_plugins()
+    installed = _read_installed_plugins(scope=scope)
     touched: list[str] = []
     skipped_optional: list[str] = []
     for plugin in ALL_PLUGINS:
@@ -169,8 +169,8 @@ def _sync_claude(install_missing: bool, opt_in: set[str]) -> None:
         elif is_optional and plugin not in opt_in:
             skipped_optional.append(plugin)
         elif install_missing:
-            click.echo(f"Enabling {plugin}...")
-            _run_claude("plugin", "install", qualified)
+            click.echo(f"Enabling {plugin} (scope: {scope})...")
+            _run_claude("plugin", "install", qualified, "--scope", scope)
             touched.append(plugin)
 
     if skipped_optional:
@@ -317,7 +317,9 @@ def _sync_codex(install_missing: bool, opt_in: set[str]) -> None:
     click.echo("Source that file before launching Codex so the MCP auth env vars are available.")
 
 
-def _run_setup_for_clients(client: str, includes: tuple[str, ...] = ()) -> None:
+def _run_setup_for_clients(
+    client: str, includes: tuple[str, ...] = (), scope: str = "project",
+) -> None:
     """Shared setup flow for one or more client integrations."""
     clients = _resolve_clients(client)
 
@@ -335,6 +337,7 @@ def _run_setup_for_clients(client: str, includes: tuple[str, ...] = ()) -> None:
         client=client,
         opt_in_claude=opt_in_claude,
         opt_in_codex=opt_in_codex,
+        scope=scope,
     )
 
     click.echo("")
@@ -355,6 +358,9 @@ def _run_setup_for_clients(client: str, includes: tuple[str, ...] = ()) -> None:
         click.echo("Restart Codex after sourcing the generated env file to activate the MCP servers.")
 
 
+_SCOPE_CHOICES = ["user", "project", "local"]
+
+
 @click.command()
 @click.option(
     "--client",
@@ -362,6 +368,18 @@ def _run_setup_for_clients(client: str, includes: tuple[str, ...] = ()) -> None:
     default="auto",
     show_default=True,
     help="Which client integrations to set up.",
+)
+@click.option(
+    "--scope",
+    type=click.Choice(_SCOPE_CHOICES),
+    default="project",
+    show_default=True,
+    help=(
+        "Claude plugin install scope. 'project' keeps plugins scoped to the "
+        "current repo (committed via .claude/), 'local' is per-checkout, "
+        "'user' is global. (Codex MCP is always global; this flag is ignored "
+        "for Codex.)"
+    ),
 )
 @click.option(
     "--with",
@@ -374,7 +392,7 @@ def _run_setup_for_clients(client: str, includes: tuple[str, ...] = ()) -> None:
         "Currently optional: " + ", ".join(OPTIONAL_PLUGINS) + "."
     ),
 )
-def setup(client: str, includes: tuple[str, ...]) -> None:
+def setup(client: str, scope: str, includes: tuple[str, ...]) -> None:
     """First-time Cassandra setup for Claude Code, Codex, or both.
 
     `cass setup` is idempotent. On Claude it registers the marketplace and
@@ -385,7 +403,7 @@ def setup(client: str, includes: tuple[str, ...]) -> None:
     are opt-in (e.g. `schwab-mcp` needs per-user Schwab auth). Already-
     installed optional plugins are always kept up to date.
     """
-    _run_setup_for_clients(client, includes)
+    _run_setup_for_clients(client, includes, scope=scope)
 
 
 @click.group()
@@ -410,19 +428,38 @@ def claude() -> None:
 
 
 @claude.command("setup")
-def claude_setup() -> None:
+@click.option(
+    "--scope",
+    type=click.Choice(_SCOPE_CHOICES),
+    default="project",
+    show_default=True,
+    help="Plugin install scope.",
+)
+def claude_setup(scope: str) -> None:
     """Set up the Cassandra Claude marketplace plugins."""
-    _run_setup_for_clients("claude")
+    _run_setup_for_clients("claude", scope=scope)
 
 
-def _read_installed_plugins() -> set[str]:
-    if not INSTALLED_PLUGINS_PATH.exists():
+def _read_installed_plugins(scope: str = "project") -> set[str]:
+    """Return plugin IDs (name@marketplace) already installed in the given scope.
+
+    Uses `claude plugin list --json` so we see the authoritative current state
+    rather than guessing from the user-scope JSON file on disk.
+    """
+    claude = shutil.which("claude")
+    if not claude:
         return set()
     try:
-        data = json.loads(INSTALLED_PLUGINS_PATH.read_text())
-        return set(data.get("plugins", {}).keys())
-    except json.JSONDecodeError:
+        result = subprocess.run(
+            [claude, "plugin", "list", "--json"],
+            capture_output=True, text=True, timeout=15, check=False,
+        )
+        if result.returncode != 0:
+            return set()
+        entries = json.loads(result.stdout)
+    except (json.JSONDecodeError, subprocess.TimeoutExpired, OSError):
         return set()
+    return {e["id"] for e in entries if e.get("scope") == scope and "id" in e}
 
 
 def _populate_mcp_keys(plugins: list[str]) -> None:

@@ -25,7 +25,7 @@ MARKETPLACE_REPO = "Cassandras-Edge/cassandra-marketplace"
 DEFAULT_PLUGINS = [
     "stopgate", "media-mcp", "twitter-mcp", "reddit-mcp", "claudeai-mcp",
     "discord-mcp", "market-research", "gemini-mcp", "perplexity-mcp",
-    "routines-mcp",
+    "routines-mcp", "cass-image",
 ]
 
 # Opt-in plugins. Each has a specific reason to be off by default

@@ -488,3 +488,118 @@ def _populate_mcp_keys(plugins: list[str]) -> None:
             click.echo(f"  using cached key for {service}")
         _write_plugin_option(settings, plugin, "mcpKey", key)
     _save_settings(settings)
+
+
+# ---------- teardown (inverse of setup) ----------
+
+
+def _teardown_claude(scope: str) -> list[str]:
+    """Uninstall all Cassandra Claude plugins at the given scope."""
+    require_supported_host()
+    installed = _read_installed_plugins(scope=scope)
+    removed: list[str] = []
+    for plugin in ALL_PLUGINS:
+        qualified = f"{plugin}@cassandra-plugins"
+        if qualified not in installed:
+            continue
+        click.echo(f"Removing {plugin} (scope: {scope})...")
+        if _run_claude("plugin", "uninstall", qualified, "--scope", scope):
+            removed.append(plugin)
+    return removed
+
+
+def _teardown_codex() -> list[str]:
+    """Remove all Cassandra Codex MCP servers (always global — no scope)."""
+    codex = shutil.which("codex")
+    if not codex:
+        raise click.ClickException("codex CLI not found in PATH.")
+    removed: list[str] = []
+    for name in CODEX_SERVERS:
+        if not _codex_has_server(name):
+            continue
+        click.echo(f"Removing {name}...")
+        try:
+            subprocess.run([codex, "mcp", "remove", name], check=True, timeout=15)
+            removed.append(name)
+        except subprocess.CalledProcessError as e:
+            click.echo(f"  warning: failed to remove {name}: {e}", err=True)
+    return removed
+
+
+def _run_teardown_for_clients(client: str, scope: str, assume_yes: bool) -> None:
+    """Shared teardown flow for one or more client integrations."""
+    clients = _resolve_clients(client)
+
+    if not assume_yes:
+        targets = []
+        if "claude" in clients:
+            targets.append(f"Claude plugins (scope: {scope})")
+        if "codex" in clients:
+            targets.append("Codex MCP servers (global)")
+        click.echo("This will remove: " + ", ".join(targets) + ".")
+        click.echo("Marketplace registration + generated env files are kept.")
+        click.confirm("Proceed?", default=False, abort=True)
+
+    removed_claude: list[str] = []
+    removed_codex: list[str] = []
+
+    if "claude" in clients:
+        removed_claude = _teardown_claude(scope)
+        if "codex" in clients:
+            click.echo("")
+
+    if "codex" in clients:
+        removed_codex = _teardown_codex()
+
+    click.echo("")
+    if "claude" in clients:
+        click.echo(f"Claude: removed {len(removed_claude)} plugin(s)"
+                   + (f" — {', '.join(removed_claude)}" if removed_claude else ""))
+    if "codex" in clients:
+        click.echo(f"Codex: removed {len(removed_codex)} MCP server(s)"
+                   + (f" — {', '.join(removed_codex)}" if removed_codex else ""))
+
+
+@click.command()
+@click.option(
+    "--client",
+    type=click.Choice(["auto", "claude", "codex", "both"]),
+    default="auto",
+    show_default=True,
+    help="Which client integrations to tear down.",
+)
+@click.option(
+    "--scope",
+    type=click.Choice(_SCOPE_CHOICES),
+    default="project",
+    show_default=True,
+    help="Claude plugin scope to remove from. (Ignored for Codex.)",
+)
+@click.option("--yes", "-y", "assume_yes", is_flag=True,
+              help="Skip the confirmation prompt.")
+def teardown(client: str, scope: str, assume_yes: bool) -> None:
+    """Remove Cassandra plugins / MCP servers (inverse of `cass setup`).
+
+    Keeps the marketplace registration and generated env files so you can
+    re-run `cass setup` cleanly. Does not uninstall `cass` itself.
+    """
+    _run_teardown_for_clients(client, scope, assume_yes)
+
+
+@codex.command("teardown")
+@click.option("--yes", "-y", "assume_yes", is_flag=True,
+              help="Skip the confirmation prompt.")
+def codex_teardown(assume_yes: bool) -> None:
+    """Remove Cassandra Codex MCP servers."""
+    _run_teardown_for_clients("codex", scope="project", assume_yes=assume_yes)
+
+
+@claude.command("teardown")
+@click.option("--scope", type=click.Choice(_SCOPE_CHOICES),
+              default="project", show_default=True,
+              help="Plugin scope to remove from.")
+@click.option("--yes", "-y", "assume_yes", is_flag=True,
+              help="Skip the confirmation prompt.")
+def claude_teardown(scope: str, assume_yes: bool) -> None:
+    """Remove Cassandra Claude plugins."""
+    _run_teardown_for_clients("claude", scope=scope, assume_yes=assume_yes)

@@ -106,8 +106,18 @@ def _resolve_release(target: str) -> dict:
 
 
 def _install_release(release: dict) -> str:
-    """Download release binary for the current platform and replace the
-    on-disk cass. Returns the installed version string."""
+    """Download release binary for the current platform and STAGE it next to
+    the running cass as `<cass>.pending`. The actual swap happens at the very
+    top of cass_entry.py on the next invocation (before any lazy imports),
+    via `_apply_pending_update` → `os.execv`.
+
+    Doing the rename mid-run corrupts PyInstaller's archive reader: the
+    onefile bundle reads its embedded archive from the binary file on
+    demand, so replacing the file invalidates cached offsets and every
+    lazy import after the swap blows up with a zlib header error.
+
+    Returns the version string that was staged.
+    """
     version = release["tag_name"].lstrip("v")
     target = _detect_target()
     asset_name = f"cass-{target}"
@@ -129,8 +139,8 @@ def _install_release(release: dict) -> str:
     target_dir = os.path.dirname(target_path) or "."
     os.makedirs(target_dir, exist_ok=True)
 
-    # Put the tempfile in the same dir as the target so `os.replace` stays atomic
-    # on the same filesystem (otherwise WSL's /tmp vs /home split breaks it with
+    # Tempfile in the same dir so the final rename to `.pending` stays on one
+    # filesystem (WSL's /tmp vs /home split would otherwise break it with
     # "Invalid cross-device link").
     with tempfile.NamedTemporaryFile(delete=False, suffix=".tmp", dir=target_dir) as tmp:
         tmp_path = tmp.name
@@ -139,19 +149,16 @@ def _install_release(release: dict) -> str:
             for chunk in resp.iter_bytes():
                 tmp.write(chunk)
 
+    pending_path = target_path + ".pending"
     try:
-        os.replace(tmp_path, target_path)
-        os.chmod(target_path, os.stat(target_path).st_mode | stat.S_IEXEC)
-    except OSError:
-        # Can't replace in-place (Windows locks, etc.) — try backup approach
-        backup = target_path + ".bak"
+        os.chmod(tmp_path, os.stat(tmp_path).st_mode | stat.S_IEXEC)
+        os.replace(tmp_path, pending_path)
+    except OSError as e:
         try:
-            os.replace(target_path, backup)
-            os.replace(tmp_path, target_path)
-            os.chmod(target_path, os.stat(target_path).st_mode | stat.S_IEXEC)
-            os.unlink(backup)
-        except OSError as e:
-            raise click.ClickException(f"Failed to replace binary: {e}") from e
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise click.ClickException(f"Failed to stage binary: {e}") from e
 
     return version
 
@@ -195,7 +202,7 @@ def install(target: str, force: bool) -> None:
         return
 
     installed = _install_release(release)
-    click.echo(f"Installed: {CURRENT_VERSION} → {installed}")
+    click.echo(f"Staged: {CURRENT_VERSION} → {installed} (applies on next `cass` invocation)")
 
 
 @click.command()
@@ -237,7 +244,10 @@ def update(check: bool, binary_only: bool, client: str) -> None:
             click.echo(f"Updated cass via scoop to {latest}.")
         else:
             installed_version = _install_release(release)
-            click.echo(f"Updated cass: {CURRENT_VERSION} → {installed_version}")
+            click.echo(
+                f"Staged cass: {CURRENT_VERSION} → {installed_version} "
+                "(applies on next `cass` invocation)"
+            )
     else:
         click.echo("cass binary is up to date.")
 
@@ -270,8 +280,8 @@ def auto_update_check() -> None:
                 err=True,
             )
             return
-        click.echo(f"Updating cass {CURRENT_VERSION} → {latest}...", err=True)
+        click.echo(f"Staging cass {CURRENT_VERSION} → {latest}...", err=True)
         _install_release(release)
-        click.echo(f"Updated to {latest}.", err=True)
+        click.echo(f"Staged {latest} — will apply on next `cass` invocation.", err=True)
     except Exception:  # noqa: BLE001
         pass  # never break the user's command

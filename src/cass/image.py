@@ -159,6 +159,7 @@ def generate(
     input_mime: str = "image/png",
     size: str = "",
     aspect: str = "",
+    quality: str = "",
     model: str = DEFAULT_MODEL,
     timeout: float = 180.0,
 ) -> ImageResult:
@@ -188,11 +189,14 @@ def generate(
             "matching the user's prompt by calling the image_generation tool."
         )
 
+    image_tool: dict = {"type": "image_generation", "output_format": "png"}
+    if quality:
+        image_tool["quality"] = quality
     body = {
         "model": model,
         "instructions": instructions,
         "input": [{"type": "message", "role": "user", "content": content}],
-        "tools": [{"type": "image_generation", "output_format": "png"}],
+        "tools": [image_tool],
         "tool_choice": {"type": "image_generation"},
         "store": False,
         "stream": True,
@@ -265,12 +269,18 @@ def _default_out_path() -> Path:
               help="Target resolution hint")
 @click.option("--model", "-m", default=DEFAULT_MODEL, show_default=True,
               help="Agent model (renderer is server-picked, currently gpt-image-2)")
-@click.option("--open/--no-open", "open_after", default=False,
-              help="Open the generated image after saving")
+@click.option("--fast", "-f", is_flag=True,
+              help="Shorthand for --quality low — faster render, lower fidelity")
+@click.option("--quality", "-q", default="",
+              type=click.Choice(["", "low", "medium", "high", "auto"],
+                                case_sensitive=False),
+              help="Render quality (overrides --fast)")
+@click.option("--open/--no-open", "open_after", default=True,
+              help="Open the generated image after saving (default: yes)")
 @click.pass_context
 def image(ctx: click.Context, prompt: str, out: Path | None,
           edit_path: Path | None, aspect: str, size: str, model: str,
-          open_after: bool) -> None:
+          fast: bool, quality: str, open_after: bool) -> None:
     """Generate or edit an image via your ChatGPT Plus/Pro subscription.
 
     Uses the same undocumented endpoint Codex's built-in image_gen tool hits
@@ -289,6 +299,8 @@ def image(ctx: click.Context, prompt: str, out: Path | None,
     out_path = out or _default_out_path()
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
+    resolved_quality = (quality or ("low" if fast else "")).lower()
+
     click.echo(f"Generating{'  (edit)' if edit_path else ''}...", err=True)
     try:
         result = generate(
@@ -297,6 +309,7 @@ def image(ctx: click.Context, prompt: str, out: Path | None,
             input_mime=input_mime,
             size=size,
             aspect=aspect,
+            quality=resolved_quality,
             model=model,
         )
     except ImageGenError as e:
@@ -325,9 +338,3 @@ def _open_file(path: Path) -> None:
         pass
 
 
-@click.command("image-mcp")
-def image_mcp() -> None:
-    """Start a stdio MCP server exposing generate_image / edit_image tools."""
-    # Deferred import so the heavy fastmcp dep only loads when this runs.
-    from cass.image_mcp import run_mcp_server
-    run_mcp_server()

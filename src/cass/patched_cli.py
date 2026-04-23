@@ -139,13 +139,18 @@ def require_supported_host() -> None:
 
 def _host_target() -> str:
     """Map host platform/arch to release artifact suffix (darwin-arm64, linux-x64, ...)."""
-    require_supported_host()
     system = platform.system().lower()
     arch = {"arm64": "arm64", "aarch64": "arm64", "x86_64": "x64", "amd64": "x64"}.get(
         platform.machine().lower(), platform.machine().lower()
     )
     if system not in {"darwin", "linux"}:
-        raise click.ClickException(f"Unsupported host platform: {system}")
+        # No patched-CLI build for native Windows yet; stock Claude Code still
+        # works. The caller wraps this so cass setup continues.
+        raise click.ClickException(
+            f"patched Claude CLI has no build for {system} — skipping. "
+            f"Stock Claude Code still works; run it inside WSL if you need the "
+            f"patched variant (OAuth for --bare, etc)."
+        )
     return f"{system}-{arch}"
 
 

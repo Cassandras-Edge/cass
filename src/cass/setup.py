@@ -10,7 +10,7 @@ from pathlib import Path
 
 import click
 
-from cass.patched_cli import _install_prebuilt, require_supported_host
+from cass.patched_cli import _install_prebuilt
 from cass.refresh_keys import PLUGIN_SERVICES, _fetch_new_key, _load_settings, _save_service_key, _save_settings, _write_plugin_option, get_service_key
 
 
@@ -146,8 +146,6 @@ def sync_platform(
 
 
 def _sync_claude(install_missing: bool, opt_in: set[str], scope: str = "project") -> None:
-    require_supported_host()
-
     click.echo(f"Refreshing Claude marketplace (scope: {scope})...")
     _run_claude("plugin", "marketplace", "update", "cassandra-plugins")
 
@@ -545,7 +543,6 @@ def _populate_mcp_keys(plugins: list[str]) -> None:
 
 def _teardown_claude(scope: str) -> list[str]:
     """Uninstall all Cassandra Claude plugins at the given scope."""
-    require_supported_host()
     installed = _read_installed_plugins(scope=scope)
     removed: list[str] = []
     for plugin in ALL_PLUGINS:

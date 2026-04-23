@@ -34,12 +34,10 @@ jobs:
           pip install .
 
       - name: Build binary
-        # --copy-metadata includes .dist-info so that importlib.metadata can
-        # resolve package versions inside the frozen binary.
-        #   - cass: CURRENT_VERSION lookup (else falls back to "0.0.0-dev")
-        #   - fastmcp: fastmcp/__init__.py reads its own version on import,
-        #     crashes `cass image-mcp` with PackageNotFoundError otherwise
-        run: pyinstaller --onefile --copy-metadata cass --copy-metadata fastmcp --name cass-${{ matrix.target }} --clean cass_entry.py
+        # --copy-metadata includes cass's .dist-info so that importlib.metadata
+        # can resolve the version inside the frozen binary. Without it,
+        # CURRENT_VERSION falls back to "0.0.0-dev".
+        run: pyinstaller --onefile --copy-metadata cass --name cass-${{ matrix.target }} --clean cass_entry.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

@@ -1,21 +1,21 @@
 {
-    "version": "0.6.22",
-    "description": "Cassandra platform CLI — auth, keys, cookies, and service management",
-    "homepage": "https://github.com/Cassandras-Edge/cass",
-    "license": "Proprietary",
-    "architecture": {
-        "64bit": {
-            "url": "https://github.com/Cassandras-Edge/cass/releases/download/v0.6.22/cass-windows-amd64.exe#/cass.exe",
-            "hash": "0d0ece5ada5e68cbaba28966c9dce69bb050c5c480c091daae219179fb775968"
-        }
-    },
-    "bin": "cass.exe",
-    "checkver": "github",
-    "autoupdate": {
-        "architecture": {
-            "64bit": {
-                "url": "https://github.com/Cassandras-Edge/cass/releases/download/v$version/cass-windows-amd64.exe#/cass.exe"
-            }
-        }
+  "version": "0.6.23",
+  "description": "Cassandra platform CLI — auth, keys, cookies, and service management",
+  "homepage": "https://github.com/Cassandras-Edge/cass",
+  "license": "Proprietary",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/Cassandras-Edge/cass/releases/download/v0.6.23/cass-windows-amd64.exe#/cass.exe",
+      "hash": "8741ab213a345e0ef75ec5a4b704c7f28aa9b099edd4840d36639b3561eab9f4"
     }
+  },
+  "bin": "cass.exe",
+  "checkver": "github",
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/Cassandras-Edge/cass/releases/download/v$version/cass-windows-amd64.exe#/cass.exe"
+      }
+    }
+  }
 }

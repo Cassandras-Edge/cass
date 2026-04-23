@@ -25,6 +25,43 @@ except PackageNotFoundError:
     CURRENT_VERSION = "0.0.0-dev"
 
 
+def _is_pipx_managed() -> bool:
+    """True if cass is running from a pipx-managed venv.
+
+    pipx installs each app into its own venv at `~/.local/pipx/venvs/<app>/`
+    (or `%USERPROFILE%\\pipx\\venvs\\<app>\\` on Windows) and shims the bin into
+    PATH. When cass runs as a Python script (not PyInstaller-frozen),
+    sys.prefix points at that venv.
+    """
+    if getattr(sys, "frozen", False):
+        return False
+    prefix = os.path.normpath(sys.prefix).replace("\\", "/").lower()
+    return "/pipx/venvs/cass" in prefix
+
+
+def _run_pipx_upgrade(silent: bool = False) -> bool:
+    """Run `pipx upgrade cass`. Returns True on success."""
+    pipx = shutil.which("pipx")
+    if not pipx:
+        if not silent:
+            click.echo(
+                "cass is installed via pipx but the pipx CLI is not on PATH.\n"
+                "Try `python -m pipx upgrade cass` or reinstall pipx.",
+                err=True,
+            )
+        return False
+    try:
+        result = subprocess.run(
+            [pipx, "upgrade", "cass"],
+            capture_output=silent,
+            text=True,
+            timeout=300,
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+
+
 def _is_scoop_managed() -> bool:
     """True if the running cass binary lives inside a scoop apps dir.
 
@@ -189,6 +226,17 @@ def install(target: str, force: bool) -> None:
             raise click.ClickException("`scoop update cass` failed.")
         return
 
+    if _is_pipx_managed():
+        if target not in ("latest", "stable"):
+            raise click.ClickException(
+                "Pinning a specific version isn't supported for pipx-managed "
+                "installs. Run `pipx upgrade cass` for the latest, or reinstall."
+            )
+        click.echo("pipx-managed install detected — delegating to `pipx upgrade cass`.")
+        if not _run_pipx_upgrade():
+            raise click.ClickException("`pipx upgrade cass` failed.")
+        return
+
     try:
         release = _resolve_release(target)
     except httpx.HTTPError as e:
@@ -220,6 +268,7 @@ def update(check: bool, binary_only: bool, client: str) -> None:
     """
     click.echo(f"Current version: {CURRENT_VERSION}")
     scoop_managed = _is_scoop_managed()
+    pipx_managed = _is_pipx_managed()
 
     try:
         release = _get_latest_release()
@@ -242,6 +291,11 @@ def update(check: bool, binary_only: bool, client: str) -> None:
             if not _run_scoop_update():
                 raise click.ClickException("`scoop update cass` failed.")
             click.echo(f"Updated cass via scoop to {latest}.")
+        elif pipx_managed:
+            click.echo("pipx-managed install detected — delegating to `pipx upgrade cass`.")
+            if not _run_pipx_upgrade():
+                raise click.ClickException("`pipx upgrade cass` failed.")
+            click.echo(f"Updated cass via pipx to {latest}.")
         else:
             installed_version = _install_release(release)
             click.echo(
@@ -277,6 +331,12 @@ def auto_update_check() -> None:
         if _is_scoop_managed():
             click.echo(
                 f"cass {latest} is available. Run `scoop update cass` to upgrade.",
+                err=True,
+            )
+            return
+        if _is_pipx_managed():
+            click.echo(
+                f"cass {latest} is available. Run `pipx upgrade cass` to upgrade.",
                 err=True,
             )
             return

@@ -66,8 +66,21 @@ OPTIONAL_CODEX_SERVERS = [
 ]
 
 
-def _resolve_opt_ins(includes: tuple[str, ...], optional_pool: list[str]) -> set[str]:
-    """Expand --with values into a concrete set of optional plugins to enable."""
+def _resolve_opt_ins(
+    includes: tuple[str, ...],
+    optional_pool: list[str],
+    known_pool: list[str] | None = None,
+) -> set[str]:
+    """Expand --with values into a concrete set of optional plugins to enable.
+
+    `optional_pool` is the set applicable to this client; only names in it get
+    selected. `known_pool` (defaults to `optional_pool`) is the set we validate
+    against — pass a union across clients so a Claude-only name doesn't error
+    when resolving for Codex. Names valid-somewhere-but-not-here are silently
+    skipped.
+    """
+    if known_pool is None:
+        known_pool = optional_pool
     selected: set[str] = set()
     for raw in includes:
         for piece in raw.split(","):
@@ -77,11 +90,12 @@ def _resolve_opt_ins(includes: tuple[str, ...], optional_pool: list[str]) -> set
             if name == "all":
                 selected.update(optional_pool)
                 continue
-            if name not in optional_pool:
+            if name not in known_pool:
                 raise click.ClickException(
-                    f"Unknown optional plugin '{name}'. Known: {', '.join(optional_pool)}, or 'all'."
+                    f"Unknown optional plugin '{name}'. Known: {', '.join(known_pool)}, or 'all'."
                 )
-            selected.add(name)
+            if name in optional_pool:
+                selected.add(name)
     return selected
 
 
@@ -327,8 +341,9 @@ def _run_setup_for_clients(
     """Shared setup flow for one or more client integrations."""
     clients = _resolve_clients(client)
 
-    opt_in_claude = _resolve_opt_ins(includes, OPTIONAL_PLUGINS)
-    opt_in_codex = _resolve_opt_ins(includes, OPTIONAL_CODEX_SERVERS)
+    all_optional = sorted(set(OPTIONAL_PLUGINS) | set(OPTIONAL_CODEX_SERVERS))
+    opt_in_claude = _resolve_opt_ins(includes, OPTIONAL_PLUGINS, all_optional)
+    opt_in_codex = _resolve_opt_ins(includes, OPTIONAL_CODEX_SERVERS, all_optional)
 
     if "claude" in clients:
         click.echo("Adding Cassandra marketplace...")

@@ -123,16 +123,21 @@ def _install_release(release: dict) -> str:
 
     click.echo(f"Downloading {asset_name}...")
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".tmp") as tmp:
+    current_bin = shutil.which("cass") or sys.executable
+    plugin_data = os.environ.get("CLAUDE_PLUGIN_DATA")
+    target_path = os.path.join(plugin_data, "bin", "cass") if plugin_data else current_bin
+    target_dir = os.path.dirname(target_path) or "."
+    os.makedirs(target_dir, exist_ok=True)
+
+    # Put the tempfile in the same dir as the target so `os.replace` stays atomic
+    # on the same filesystem (otherwise WSL's /tmp vs /home split breaks it with
+    # "Invalid cross-device link").
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".tmp", dir=target_dir) as tmp:
         tmp_path = tmp.name
         with httpx.stream("GET", url, follow_redirects=True, timeout=60) as resp:
             resp.raise_for_status()
             for chunk in resp.iter_bytes():
                 tmp.write(chunk)
-
-    current_bin = shutil.which("cass") or sys.executable
-    plugin_data = os.environ.get("CLAUDE_PLUGIN_DATA")
-    target_path = os.path.join(plugin_data, "bin", "cass") if plugin_data else current_bin
 
     try:
         os.replace(tmp_path, target_path)

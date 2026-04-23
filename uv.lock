@@ -51,7 +51,7 @@ wheels = [
 
 [[package]]
 name = "cass"
-version = "0.6.28"
+version = "0.6.32"
 source = { editable = "." }
 dependencies = [
     { name = "click" },

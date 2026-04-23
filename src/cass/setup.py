@@ -34,6 +34,7 @@ OPTIONAL_PLUGINS = [
     "gemini-mcp",        # grounded web search via Gemini
     "perplexity-mcp",    # grounded web search via Perplexity
     "routines-mcp",      # fire/inspect your autonomous routines
+    "cass-image",        # skill teaching Claude to use `cass image` via Bash
     "tradingview-mcp",   # owner-only ACL (NekoKeys Pro account)
     "schwab-mcp",        # per-user Schwab OAuth — run `cass auth schwab` after
 ]

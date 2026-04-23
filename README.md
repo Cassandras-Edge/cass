@@ -4,6 +4,8 @@ Cassandra platform CLI — auth, keys, cookies, and service management.
 
 ## Install
 
+### macOS / Linux / WSL
+
 ```bash
 # With gh CLI (works with private repos)
 gh release download --repo Cassandras-Edge/cass --pattern 'cass-darwin-arm64' --dir ~/.local/bin
@@ -16,6 +18,17 @@ gh api repos/Cassandras-Edge/cass/contents/install.sh --jq '.content' | base64 -
 Installs to `~/.local/bin/cass`. Set `CASS_INSTALL_DIR` to change the location.
 
 Make sure `~/.local/bin` is in your PATH.
+
+### Windows (native, via scoop)
+
+```powershell
+scoop bucket add cassandra https://github.com/Cassandras-Edge/cass
+scoop install cass
+```
+
+`cass update` auto-detects scoop-managed installs and delegates to `scoop update cass`, so updates stay in sync with scoop's manifest ledger.
+
+> `cass claude setup` currently still requires WSL for the Claude Code integration. The `cass` binary itself (auth, keys, Codex setup) works on native Windows via scoop.
 
 ## Setup
 

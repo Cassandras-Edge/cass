@@ -6,6 +6,7 @@ import os
 import platform
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
@@ -22,6 +23,45 @@ try:
     CURRENT_VERSION = _pkg_version("cass")
 except PackageNotFoundError:
     CURRENT_VERSION = "0.0.0-dev"
+
+
+def _is_scoop_managed() -> bool:
+    """True if the running cass binary lives inside a scoop apps dir.
+
+    Scoop installs to `%USERPROFILE%\\scoop\\apps\\<app>\\current\\<bin>.exe`
+    (or `%SCOOP%\\apps\\...`). If cass is there, users must update via
+    `scoop update cass` so scoop's manifest ledger stays in sync.
+    """
+    if platform.system().lower() != "windows":
+        return False
+    bin_path = shutil.which("cass") or sys.executable
+    norm = os.path.normpath(bin_path).lower()
+    return os.sep + "scoop" + os.sep + "apps" + os.sep + "cass" + os.sep in norm
+
+
+def _run_scoop_update(silent: bool = False) -> bool:
+    """Run `scoop update cass`. Returns True on success."""
+    scoop = shutil.which("scoop")
+    if not scoop:
+        if not silent:
+            click.echo(
+                "cass is installed via scoop but the scoop CLI is not on PATH.\n"
+                "Open a new PowerShell session or reinstall scoop, then re-run.",
+                err=True,
+            )
+        return False
+    try:
+        # `scoop` on Windows is a shim that needs the shell; use shell=True only
+        # when invoking via cmd. subprocess.run with the shim path works directly.
+        result = subprocess.run(
+            [scoop, "update", "cass"],
+            capture_output=silent,
+            text=True,
+            timeout=300,
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, OSError):
+        return False
 
 
 def _detect_target() -> str:
@@ -125,6 +165,18 @@ def install(target: str, force: bool) -> None:
         cass install v0.6.8       # same
     """
     click.echo(f"Current version: {CURRENT_VERSION}")
+
+    if _is_scoop_managed():
+        if target not in ("latest", "stable"):
+            raise click.ClickException(
+                "Pinning a specific version isn't supported for scoop-managed "
+                "installs. Run `scoop update cass` for the latest, or reinstall."
+            )
+        click.echo("scoop-managed install detected — delegating to `scoop update cass`.")
+        if not _run_scoop_update():
+            raise click.ClickException("`scoop update cass` failed.")
+        return
+
     try:
         release = _resolve_release(target)
     except httpx.HTTPError as e:
@@ -155,6 +207,7 @@ def update(check: bool, binary_only: bool, client: str) -> None:
     """Update everything — the cass binary plus configured Claude/Codex integrations.
     """
     click.echo(f"Current version: {CURRENT_VERSION}")
+    scoop_managed = _is_scoop_managed()
 
     try:
         release = _get_latest_release()
@@ -172,8 +225,14 @@ def update(check: bool, binary_only: bool, client: str) -> None:
         return
 
     if latest != CURRENT_VERSION:
-        installed_version = _install_release(release)
-        click.echo(f"Updated cass: {CURRENT_VERSION} → {installed_version}")
+        if scoop_managed:
+            click.echo("scoop-managed install detected — delegating to `scoop update cass`.")
+            if not _run_scoop_update():
+                raise click.ClickException("`scoop update cass` failed.")
+            click.echo(f"Updated cass via scoop to {latest}.")
+        else:
+            installed_version = _install_release(release)
+            click.echo(f"Updated cass: {CURRENT_VERSION} → {installed_version}")
     else:
         click.echo("cass binary is up to date.")
 
@@ -199,6 +258,12 @@ def auto_update_check() -> None:
         release = _get_latest_release()
         latest = release["tag_name"].lstrip("v")
         if latest == CURRENT_VERSION:
+            return
+        if _is_scoop_managed():
+            click.echo(
+                f"cass {latest} is available. Run `scoop update cass` to upgrade.",
+                err=True,
+            )
             return
         click.echo(f"Updating cass {CURRENT_VERSION} → {latest}...", err=True)
         _install_release(release)

@@ -18,21 +18,25 @@ CODEX_ENV_PATH = Path.home() / ".config" / "cass" / "codex-mcp.env"
 
 
 MARKETPLACE_REPO = "Cassandras-Edge/cassandra-marketplace"
+MARKETPLACE_NAME = "cassandra-plugins"
 
-# Plugins installed by default on `cass setup`. Safe for any user — no
-# per-user credentials, no owner-gated ACLs, useful broadly.
+# Plugins installed by default on `cass setup`. Kept intentionally narrow —
+# the everyday "what people are saying / market data" set. Everything else is
+# opt-in via `--with`.
 DEFAULT_PLUGINS = [
-    "stopgate", "media-mcp", "twitter-mcp", "reddit-mcp", "claudeai-mcp",
-    "discord-mcp", "market-research", "gemini-mcp", "perplexity-mcp",
-    "routines-mcp", "cass-image",
+    "media-mcp", "twitter-mcp", "reddit-mcp", "discord-mcp", "market-research",
 ]
 
-# Opt-in plugins. Each has a specific reason to be off by default
-# (owner-only ACL, per-user brokerage auth, etc.). Install via
-# `cass setup --with <name>` or `cass setup --with all`.
+# Opt-in plugins. Install via `cass setup --with <name>` or `--with all`.
 OPTIONAL_PLUGINS = [
-    "tradingview-mcp",  # owner-only ACL (NekoKeys Pro account)
-    "schwab-mcp",       # per-user Schwab OAuth — run `cass auth schwab` after
+    "stopgate",          # session rate-limit guard
+    "claudeai-mcp",      # read/write your claude.ai account
+    "gemini-mcp",        # grounded web search via Gemini
+    "perplexity-mcp",    # grounded web search via Perplexity
+    "routines-mcp",      # fire/inspect your autonomous routines
+    "cass-image",        # ChatGPT-sub image generation
+    "tradingview-mcp",   # owner-only ACL (NekoKeys Pro account)
+    "schwab-mcp",        # per-user Schwab OAuth — run `cass auth schwab` after
 ]
 
 ALL_PLUGINS = DEFAULT_PLUGINS + OPTIONAL_PLUGINS
@@ -51,12 +55,15 @@ CODEX_SERVERS: dict[str, dict[str, str]] = {
     "routines": {"service": "routines", "subdomain": "routines-mcp"},
     "schwab-mcp": {"service": "schwab-mcp", "subdomain": "schwab"},
 }
-# Same default/optional split applies to Codex servers.
+# Mirror the Claude default/optional split. `yt-mcp` is the Codex-side name for
+# what Claude calls media-mcp.
 DEFAULT_CODEX_SERVERS = [
     "yt-mcp", "discord-mcp", "twitter-mcp", "market-research", "reddit-mcp",
-    "claudeai-mcp", "gemini-mcp", "perplexity-mcp", "gateway", "routines",
 ]
-OPTIONAL_CODEX_SERVERS = ["tradingview-mcp", "schwab-mcp"]
+OPTIONAL_CODEX_SERVERS = [
+    "claudeai-mcp", "gemini-mcp", "perplexity-mcp", "gateway", "routines",
+    "tradingview-mcp", "schwab-mcp",
+]
 
 
 def _resolve_opt_ins(includes: tuple[str, ...], optional_pool: list[str]) -> set[str]:
@@ -153,18 +160,17 @@ def _sync_claude(install_missing: bool, opt_in: set[str], scope: str = "project"
     except Exception as e:
         click.echo(f"  warning: patched-cli install failed: {e}", err=True)
 
-    installed = _read_installed_plugins(scope=scope)
+    installed = _read_installed_plugins_by_scope()
     touched: list[str] = []
     skipped_optional: list[str] = []
     for plugin in ALL_PLUGINS:
         qualified = f"{plugin}@cassandra-plugins"
         is_optional = plugin in OPTIONAL_PLUGINS
-        already_installed = qualified in installed
+        installed_scope = installed.get(qualified)
 
-        if already_installed:
-            # Keep what the user already chose up to date, always.
-            click.echo(f"Updating {plugin}...")
-            _run_claude("plugin", "update", qualified)
+        if installed_scope:
+            click.echo(f"Updating {plugin} (scope: {installed_scope})...")
+            _run_claude("plugin", "update", qualified, "--scope", installed_scope)
             touched.append(plugin)
         elif is_optional and plugin not in opt_in:
             skipped_optional.append(plugin)
@@ -329,6 +335,10 @@ def _run_setup_for_clients(
     if "claude" in clients:
         click.echo("Adding Cassandra marketplace...")
         _run_claude("plugin", "marketplace", "add", MARKETPLACE_REPO)
+        # `claude plugin marketplace add` only writes user scope; mirror into
+        # project/local settings so plugins installed there can resolve it.
+        if scope in ("project", "local"):
+            _ensure_marketplace_in_scope_settings(scope)
         if "codex" in clients:
             click.echo("")
 
@@ -440,26 +450,66 @@ def claude_setup(scope: str) -> None:
     _run_setup_for_clients("claude", scope=scope)
 
 
+def _ensure_marketplace_in_scope_settings(scope: str) -> None:
+    """Merge extraKnownMarketplaces into the project/local settings file.
+
+    Claude Code's `plugin marketplace add` always writes user scope; for
+    project/local scopes we edit the settings file directly so the marketplace
+    is self-contained at the same scope as enabledPlugins.
+    """
+    if scope == "project":
+        path = Path.cwd() / ".claude" / "settings.json"
+    elif scope == "local":
+        path = Path.cwd() / ".claude" / "settings.local.json"
+    else:
+        return
+
+    data: dict = {}
+    if path.exists():
+        try:
+            data = json.loads(path.read_text())
+            if not isinstance(data, dict):
+                data = {}
+        except json.JSONDecodeError:
+            data = {}
+
+    marketplaces = data.setdefault("extraKnownMarketplaces", {})
+    entry = {"source": {"source": "github", "repo": MARKETPLACE_REPO}}
+    if marketplaces.get(MARKETPLACE_NAME) == entry:
+        return
+
+    marketplaces[MARKETPLACE_NAME] = entry
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n")
+    click.echo(f"  wrote marketplace to {path}")
+
+
 def _read_installed_plugins(scope: str = "project") -> set[str]:
-    """Return plugin IDs (name@marketplace) already installed in the given scope.
+    """Return plugin IDs (name@marketplace) already installed in the given scope."""
+    return {pid for pid, s in _read_installed_plugins_by_scope().items() if s == scope}
+
+
+def _read_installed_plugins_by_scope() -> dict[str, str]:
+    """Return {plugin_id: scope} for every installed plugin across all scopes.
 
     Uses `claude plugin list --json` so we see the authoritative current state
-    rather than guessing from the user-scope JSON file on disk.
+    rather than guessing from settings files. Lets the caller update each plugin
+    at whichever scope it lives in, rather than assuming all share one scope.
     """
     claude = shutil.which("claude")
     if not claude:
-        return set()
+        return {}
     try:
         result = subprocess.run(
             [claude, "plugin", "list", "--json"],
             capture_output=True, text=True, timeout=15, check=False,
         )
         if result.returncode != 0:
-            return set()
+            return {}
         entries = json.loads(result.stdout)
     except (json.JSONDecodeError, subprocess.TimeoutExpired, OSError):
-        return set()
-    return {e["id"] for e in entries if e.get("scope") == scope and "id" in e}
+        return {}
+    return {e["id"]: e["scope"] for e in entries if "id" in e and "scope" in e}
 
 
 def _populate_mcp_keys(plugins: list[str]) -> None:

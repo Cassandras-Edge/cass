@@ -59,3 +59,45 @@ jobs:
         with:
           files: binaries/*
           generate_release_notes: true
+
+  bump-scoop:
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Bump scoop manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF##*/}"
+          VERSION="${TAG#v}"
+
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'cass-windows-amd64.exe' --dir /tmp --clobber
+
+          HASH=$(sha256sum /tmp/cass-windows-amd64.exe | cut -d' ' -f1)
+          URL="https://github.com/$GITHUB_REPOSITORY/releases/download/v${VERSION}/cass-windows-amd64.exe#/cass.exe"
+
+          jq --arg v "$VERSION" --arg h "$HASH" --arg u "$URL" '
+            .version = $v
+            | .architecture["64bit"].url = $u
+            | .architecture["64bit"].hash = $h
+          ' scoop/cass.json > scoop/cass.json.new
+          mv scoop/cass.json.new scoop/cass.json
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add scoop/cass.json
+          if git diff --cached --quiet; then
+            echo "scoop manifest already up to date"
+            exit 0
+          fi
+          git commit -m "chore(scoop): bump to v${VERSION}"
+          git push origin main

@@ -30,19 +30,13 @@ scoop install cass
 
 > `cass claude setup` currently still requires WSL for the Claude Code integration. The `cass` binary itself (auth, keys, Codex setup) works on native Windows via scoop.
 
-#### Smart App Control / Defender blocks
+#### Smart App Control blocks
 
-The `cass.exe` binary is unsigned — Windows 11's Smart App Control (on by default for clean installs) will refuse to run it with `An Application Control policy has blocked this file`. Until we provision Authenticode signing, unblock the binary once per install:
+The `cass.exe` binary is unsigned. Windows 11's Smart App Control (on by default for clean installs) will refuse to run it with `An Application Control policy has blocked this file`. SAC operates below Defender, so `Unblock-File` and `Add-MpPreference -ExclusionPath` don't help — confirmed empirically.
 
-```powershell
-# Clear the Mark-of-the-Web attribute (usually enough on its own)
-Unblock-File "$env:USERPROFILE\scoop\apps\cass\current\cass.exe"
+Fix: **Settings → Privacy & security → Windows Security → Smart App Control → Off.** Caveat from Microsoft: re-enabling SAC later requires a Windows reinstall. For technical users running custom CLI tooling this is usually an acceptable trade.
 
-# If SAC/Defender still blocks, add a Defender exclusion for the scoop app dir:
-Add-MpPreference -ExclusionPath "$env:USERPROFILE\scoop\apps\cass"
-```
-
-Re-run both after `scoop update cass` if a new version gets blocked.
+Long-term fix is Authenticode signing in CI (Azure Trusted Signing is ~$10/mo). Revisit if more than one person needs cass on a SAC-enabled machine.
 
 ## Setup
 

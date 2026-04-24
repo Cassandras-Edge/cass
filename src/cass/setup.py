@@ -21,10 +21,12 @@ MARKETPLACE_REPO = "Cassandras-Edge/cassandra-marketplace"
 MARKETPLACE_NAME = "cassandra-plugins"
 
 # Plugins installed by default on `cass setup`. Kept intentionally narrow —
-# the everyday "what people are saying / market data" set. Everything else is
-# opt-in via `--with`.
+# the everyday "what people are saying / market data" set plus the
+# share-convo skill so teleporting sessions works out of the box.
+# Everything else is opt-in via `--with`.
 DEFAULT_PLUGINS = [
     "media-mcp", "twitter-mcp", "reddit-mcp", "discord-mcp", "market-research",
+    "share-convo",
 ]
 
 # Opt-in plugins. Install via `cass setup --with <name>` or `--with all`.

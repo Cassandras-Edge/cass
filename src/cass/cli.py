@@ -19,6 +19,7 @@ from cass.patched_cli import patched_cli
 from cass.refresh_keys import refresh_keys
 from cass.schwab import auth as auth_group
 from cass.setup import claude, codex, setup, teardown
+from cass.share import share
 from cass.update import install, update, auto_update_check, CURRENT_VERSION
 
 
@@ -71,6 +72,7 @@ main.add_command(install)
 main.add_command(refresh_keys)
 main.add_command(auth_group)
 main.add_command(setup)
+main.add_command(share)
 main.add_command(teardown)
 main.add_command(codex)
 main.add_command(claude)

@@ -6,7 +6,7 @@
   "architecture": {
     "64bit": {
       "url": "https://github.com/Cassandras-Edge/cass/releases/download/v0.7.0/cass-windows-amd64.exe#/cass.exe",
-      "hash": "4d530478625814ac67048d55c20d34396d35a7bf61a1b3cd4334ff187a91974a"
+      "hash": "df23211ae64bd1a952e1f270b821683ecc04a7af1376d9d2109990eb39abcfc5"
     }
   },
   "bin": "cass.exe",

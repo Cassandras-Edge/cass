@@ -22,6 +22,8 @@ import argparse
 import json
 import subprocess
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 
@@ -57,11 +59,11 @@ Format each example as JSON, one per line:
 Note: negative examples have EMPTY spans arrays. Only output the JSONL lines — no prose, no code fences."""
 
 
-def _call_codex(prompt: str, model: str, timeout: int = 120) -> str:
+def _call_codex(prompt: str, model: str, timeout: int = 180) -> str:
     """Invoke `codex exec` and return its stdout."""
     try:
         r = subprocess.run(
-            ["codex", "exec", "--model", model, prompt],
+            ["codex", "exec", "--skip-git-repo-check", "--model", model, prompt],
             capture_output=True, text=True, timeout=timeout, check=False,
         )
     except FileNotFoundError:
@@ -73,11 +75,15 @@ def _call_codex(prompt: str, model: str, timeout: int = 120) -> str:
 
 
 def _extract_jsonl(s: str) -> list[dict]:
-    """Parse JSONL lines, tolerating stray output around them."""
+    """Parse JSONL lines and dedup (codex emits streamed output then a final
+    summary — the same lines appear twice in practice)."""
     out: list[dict] = []
+    seen: set[str] = set()
     for line in s.splitlines():
         line = line.strip()
         if not line or not line.startswith("{"):
+            continue
+        if line in seen:
             continue
         try:
             obj = json.loads(line)
@@ -85,6 +91,7 @@ def _extract_jsonl(s: str) -> list[dict]:
             continue
         if isinstance(obj, dict) and "text" in obj and "spans" in obj:
             out.append(obj)
+            seen.add(line)
     return out
 
 
@@ -103,6 +110,38 @@ def _validate_example(ex: dict) -> bool:
     return True
 
 
+def _build_prompt(seed: dict, args) -> str:
+    spans = seed.get("spans") or []
+    if spans:
+        sp = spans[0]
+        total = args.variants * args.contexts
+        return PROMPT_POSITIVE.format(
+            text=seed["text"], start=sp["start"], end=sp["end"],
+            label=sp["label"],
+            span_text=seed["text"][sp["start"]:sp["end"]],
+            n_variants=args.variants, n_contexts=args.contexts, total=total,
+        )
+    text = seed["text"]
+    span_text = max(text.split(), key=len) if text.strip() else "abc123"
+    total = args.negatives_per_seed
+    return PROMPT_NEGATIVE.format(text=text, span_text=span_text, total=total)
+
+
+def _process_seed(idx: int, total: int, seed: dict, args) -> tuple[int, list[dict], list[dict]]:
+    """Generate synth examples for one seed. Returns (idx, valid_examples, rejected)."""
+    prompt = _build_prompt(seed, args)
+    raw = _call_codex(prompt, args.model)
+    parsed = _extract_jsonl(raw)
+    valid: list[dict] = []
+    rejected: list[dict] = []
+    for ex in parsed:
+        if _validate_example(ex):
+            valid.append(ex)
+        else:
+            rejected.append(ex)
+    return idx, valid, rejected
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--seeds", type=Path, required=True,
@@ -119,6 +158,9 @@ def main() -> int:
     ap.add_argument("--model", default="gpt-5.4-mini",
                     help="Codex model. Default gpt-5.4-mini — small/cheap is fine "
                          "because the task is templated generation, not reasoning.")
+    ap.add_argument("--parallel", type=int, default=8,
+                    help="Concurrent codex exec calls. Codex-mini handles this fine; "
+                         "each call is ~20s blocked on the API. Default 8.")
     ap.add_argument("--dry-run", action="store_true",
                     help="Print prompts but do not call codex.")
     args = ap.parse_args()
@@ -132,44 +174,42 @@ def main() -> int:
         return 1
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
+    if args.dry_run:
+        for i, seed in enumerate(seeds, start=1):
+            print(f"--- seed {i} ---\n{_build_prompt(seed, args)}\n", file=sys.stderr)
+        return 0
+
+    total = len(seeds)
     n_written = 0
     n_rejected = 0
+    lock = threading.Lock()
 
-    with args.out.open("w") as out_f:
-        for idx, seed in enumerate(seeds, start=1):
-            spans = seed.get("spans") or []
-            if spans:
-                sp = spans[0]  # take first span; multi-span seeds are rare
-                total = args.variants * args.contexts
-                prompt = PROMPT_POSITIVE.format(
-                    text=seed["text"], start=sp["start"], end=sp["end"],
-                    label=sp["label"],
-                    span_text=seed["text"][sp["start"]:sp["end"]],
-                    n_variants=args.variants, n_contexts=args.contexts, total=total,
-                )
-            else:
-                # Infer the "visible string" to mimic: longest run of non-space.
-                text = seed["text"]
-                span_text = max(text.split(), key=len) if text.strip() else "abc123"
-                total = args.negatives_per_seed
-                prompt = PROMPT_NEGATIVE.format(
-                    text=text, span_text=span_text, total=total,
-                )
+    print(f"Synthesizing from {total} seeds with {args.parallel}-way concurrency...",
+          file=sys.stderr, flush=True)
 
-            if args.dry_run:
-                print(f"--- seed {idx} ---\n{prompt}\n", file=sys.stderr)
+    with args.out.open("w") as out_f, ThreadPoolExecutor(max_workers=args.parallel) as pool:
+        futures = {
+            pool.submit(_process_seed, i, total, seed, args): i
+            for i, seed in enumerate(seeds, start=1)
+        }
+        completed = 0
+        for fut in as_completed(futures):
+            try:
+                idx, valid, rejected = fut.result()
+            except Exception as e:
+                idx = futures[fut]
+                print(f"  [seed {idx}] error: {e}", file=sys.stderr)
                 continue
-
-            raw = _call_codex(prompt, args.model)
-            examples = _extract_jsonl(raw)
-            for ex in examples:
-                if not _validate_example(ex):
-                    n_rejected += 1
-                    continue
-                out_f.write(json.dumps(ex, ensure_ascii=False) + "\n")
-                n_written += 1
-            print(f"  [seed {idx}/{len(seeds)}] kept={len(examples) - n_rejected} "
-                  f"total-written={n_written}", file=sys.stderr)
+            with lock:
+                for ex in valid:
+                    out_f.write(json.dumps(ex, ensure_ascii=False) + "\n")
+                out_f.flush()
+                n_written += len(valid)
+                n_rejected += len(rejected)
+                completed += 1
+                print(f"  [{completed}/{total}] seed {idx}: kept={len(valid)} "
+                      f"rejected={len(rejected)}  running-total={n_written}",
+                      file=sys.stderr, flush=True)
 
     print(f"\nDone. Wrote {n_written} synthetic examples "
           f"(rejected {n_rejected} malformed). Output: {args.out}", file=sys.stderr)

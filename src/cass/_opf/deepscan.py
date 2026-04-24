@@ -36,6 +36,7 @@ class Span:
     end: int
     text: str
     placeholder: str    # "<SECRET>", "<PRIVATE_EMAIL>"
+    score: float = 0.0  # mean softmax prob across the span's tokens (0..1)
 
 
 class DeepScanUnavailable(RuntimeError):
@@ -128,25 +129,40 @@ def detect(text: str) -> list[Span]:
     if not tok_spans:
         return []
 
-    # Need tiktoken-style char offsets. mlx-embeddings' tokenizer may not be
-    # tiktoken; reuse the OPF recipe via tiktoken on the token ids when we can,
-    # otherwise fall back to the tokenizer's offset_mapping.
+    # Per-token predicted-class probability — used later for span-level scores.
+    probs = np.exp(logprobs)
+    probs = probs / probs.sum(axis=-1, keepdims=True)
+    per_token_score = probs[np.arange(len(labels)), np.array(labels, dtype=np.int64)]
+
     char_starts, char_ends = _char_offsets(text, token_ids_np, tokenizer)
 
-    char_spans = token_spans_to_char_spans(tok_spans, char_starts, char_ends)
-    char_spans = trim_char_spans_whitespace(char_spans, text)
-
     out_spans: list[Span] = []
-    for label_idx, s, e in char_spans:
+    for label_idx, tok_start, tok_end in tok_spans:
         if 0 <= label_idx < len(label_info.span_class_names):
             name = label_info.span_class_names[label_idx]
         else:
             name = f"label_{label_idx}"
         if name == "O":
             continue
+        if not (0 <= tok_start < tok_end <= len(char_starts)):
+            continue
+        char_start = char_starts[tok_start]
+        char_end = char_ends[tok_end - 1]
+        if char_end <= char_start:
+            continue
+        # trim whitespace
+        while char_start < char_end and text[char_start].isspace():
+            char_start += 1
+        while char_end > char_start and text[char_end - 1].isspace():
+            char_end -= 1
+        if char_end <= char_start:
+            continue
+        span_score = float(per_token_score[tok_start:tok_end].mean())
         out_spans.append(Span(
-            label=name, start=s, end=e, text=text[s:e],
+            label=name, start=char_start, end=char_end,
+            text=text[char_start:char_end],
             placeholder=_label_placeholder(name),
+            score=span_score,
         ))
     return out_spans
 

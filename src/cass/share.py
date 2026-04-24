@@ -141,24 +141,41 @@ def _sanitize(text: str) -> str:
 
 
 def _opf_sanitize(text: str) -> str:
-    """Deep scan via OPF. No-op if the scrub service isn't configured or fails.
+    """Deep scan via OPF. Prefers in-process MLX when available, else HTTP.
 
-    Contract: POSTs the text to CASS_SCRUB_URL (or a future `cassandra-scrub`
-    deployment), which runs OPF server-side and returns the redacted text.
-    Keeping the network call optional lets cass ship without a heavy local
-    model dependency.
+    Resolution order:
+      1. In-process `cass._opf.deepscan` (MLX on Apple Silicon, ~10-25 ms/input)
+      2. Remote CASS_SCRUB_URL (e.g. cassandra-scrub on Modal/GPU box)
+      3. Silent no-op — regex pass is the safety net
+
+    Install local support with:  pip install 'cass[deepscan]'  (macOS arm64 only)
     """
-    scrub_url = os.environ.get("CASS_SCRUB_URL")
-    if not scrub_url:
-        return text
+    # In-process MLX path.
     try:
-        with httpx.Client(timeout=60) as client:
-            resp = client.post(scrub_url, json={"text": text})
-            resp.raise_for_status()
-            return resp.json().get("redacted", text)
-    except Exception as e:
-        click.echo(f"(deep-scan unavailable: {e} — using regex-only)", err=True)
-        return text
+        from cass._opf.deepscan import sanitize as _mlx_sanitize, DeepScanUnavailable
+    except ImportError:
+        _mlx_sanitize = None
+        DeepScanUnavailable = Exception  # type: ignore[assignment,misc]
+    if _mlx_sanitize is not None:
+        try:
+            return _mlx_sanitize(text)
+        except DeepScanUnavailable as e:
+            click.echo(f"(MLX deep-scan unavailable: {e})", err=True)
+        except Exception as e:
+            click.echo(f"(MLX deep-scan failed: {e})", err=True)
+
+    # Remote HTTP fallback.
+    scrub_url = os.environ.get("CASS_SCRUB_URL")
+    if scrub_url:
+        try:
+            with httpx.Client(timeout=60) as client:
+                resp = client.post(scrub_url, json={"text": text})
+                resp.raise_for_status()
+                return resp.json().get("redacted", text)
+        except Exception as e:
+            click.echo(f"(remote deep-scan unavailable: {e})", err=True)
+
+    return text
 
 
 def _extract_content(record: dict) -> list[tuple[str, str]]:

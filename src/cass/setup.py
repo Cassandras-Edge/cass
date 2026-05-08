@@ -8,7 +8,10 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import os
+
 import click
+import httpx
 
 from cass.patched_cli import _install_prebuilt
 from cass.refresh_keys import PLUGIN_SERVICES, _load_settings, _save_settings, _write_plugin_option
@@ -335,11 +338,116 @@ def _sync_codex(install_missing: bool, opt_in: set[str]) -> None:
     click.echo("Source that file before launching Codex so the MCP auth env vars are available.")
 
 
+def _ensure_device_authorized(device_name: str | None, force_reauth: bool) -> None:
+    """Run the device login ceremony if creds are missing/expired/near-expiry.
+
+    Idempotent: with valid creds and not --force, this is a no-op.
+    Otherwise drives the browser-loopback flow (cass.auth._run_login_flow),
+    which writes ~/.cass/env and returns.
+
+    When env file is sourced after this returns, CASS_MCP_KEY etc. are
+    in os.environ and downstream setup steps see them.
+    """
+    import datetime as _dt  # noqa: PLC0415
+    import socket  # noqa: PLC0415
+    from cass.cli_auth import ENV_PATH, get_env_credentials  # noqa: PLC0415
+    from cass.config import get_portal_url  # noqa: PLC0415
+
+    # Source the env file if it exists but isn't in our os.environ yet
+    # (common case: setup invoked from a shell that started before env was
+    # written or hasn't sourced ~/.cass/env).
+    creds = get_env_credentials()
+    if not creds and ENV_PATH.exists():
+        for line in ENV_PATH.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export "):]
+            if "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            os.environ[k] = v.strip().strip("'").strip('"')
+        creds = get_env_credentials()
+
+    expiry_warn_days = 7
+    needs_login = force_reauth or creds is None
+    expiring = False
+
+    if creds and not force_reauth:
+        # Probe portal for the key's expires_at. If missing/expired, re-auth.
+        try:
+            r = httpx.get(
+                f"{get_portal_url()}/api/extension/whoami",
+                headers={
+                    "CF-Access-Client-Id": creds["cf_access_client_id"],
+                    "CF-Access-Client-Secret": creds["cf_access_client_secret"],
+                    "Authorization": f"Bearer {creds['mcp_key']}",
+                },
+                timeout=8,
+            )
+            if r.status_code == 401:
+                click.echo("  existing creds rejected (revoked/expired) — re-authorizing")
+                needs_login = True
+            elif r.status_code == 200:
+                exp = (r.json() or {}).get("expires_at")
+                if exp:
+                    expires = _dt.datetime.fromisoformat(exp.replace("Z", "+00:00"))
+                    if expires.tzinfo is None:
+                        expires = expires.replace(tzinfo=_dt.timezone.utc)
+                    delta = expires - _dt.datetime.now(_dt.timezone.utc)
+                    if delta.total_seconds() <= 0:
+                        click.echo("  device creds expired — re-authorizing")
+                        needs_login = True
+                    elif delta.days <= expiry_warn_days:
+                        click.echo(
+                            f"  device creds expire in {delta.days} day(s) — "
+                            "re-authorizing to refresh",
+                        )
+                        needs_login = True
+                        expiring = True
+        except httpx.HTTPError:
+            click.echo("  could not reach portal to validate creds — proceeding "
+                       "with whatever's in env", err=True)
+
+    if not needs_login:
+        click.echo(f"  device creds present and healthy (email: {creds['email']})")
+        return
+
+    if not device_name:
+        default = socket.gethostname().split(".")[0]
+        if click.get_text_stream("stdin").isatty():
+            device_name = click.prompt("Device name", default=default)
+        else:
+            device_name = default
+
+    click.echo(f"  authorizing device '{device_name}'...")
+    from cass.auth import _run_login_flow  # noqa: PLC0415
+    _run_login_flow(device_name=device_name)
+
+    # Re-source env after login so the rest of setup sees the new creds.
+    if ENV_PATH.exists():
+        for line in ENV_PATH.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("export "):
+                line = line[len("export "):]
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            os.environ[k] = v.strip().strip("'").strip('"')
+
+
 def _run_setup_for_clients(
     client: str, includes: tuple[str, ...] = (), scope: str = "project",
+    device_name: str | None = None, force_reauth: bool = False,
 ) -> None:
     """Shared setup flow for one or more client integrations."""
     clients = _resolve_clients(client)
+
+    # 1. Make sure this device is authorized (creds present + not expiring).
+    click.echo("Checking device authorization...")
+    _ensure_device_authorized(device_name, force_reauth)
+    click.echo("")
 
     all_optional = sorted(set(OPTIONAL_PLUGINS) | set(OPTIONAL_CODEX_SERVERS))
     opt_in_claude = _resolve_opt_ins(includes, OPTIONAL_PLUGINS, all_optional)
@@ -415,18 +523,32 @@ _SCOPE_CHOICES = ["user", "project", "local"]
         "Currently optional: " + ", ".join(OPTIONAL_PLUGINS) + "."
     ),
 )
-def setup(client: str, scope: str, includes: tuple[str, ...]) -> None:
+@click.option(
+    "--device", "device_name", default=None,
+    help="Device name to register (default: prompt with hostname).",
+)
+@click.option(
+    "--reauth", is_flag=True,
+    help="Force a fresh device login even if existing creds are valid. "
+         "Use after a leak suspicion or to manually rotate.",
+)
+def setup(client: str, scope: str, includes: tuple[str, ...],
+          device_name: str | None, reauth: bool) -> None:
     """First-time Cassandra setup for Claude Code, Codex, or both.
 
-    `cass setup` is idempotent. On Claude it registers the marketplace and
-    enables Cassandra plugins. On Codex it provisions MCP keys, writes a local
-    env file, and registers the Cassandra MCP servers with `codex mcp add`.
+    Idempotent + interactive. Steps:
+      1. Check device authorization. Missing or near-expiry → run the
+         browser-loopback flow (prompts for device name first).
+      2. Register the Cassandra plugin marketplace.
+      3. Install / update plugins (default + any --with selections).
+      4. Write per-device mcp_key into all plugin user_configs.
 
-    Default-installed plugins: every safe-for-anyone service. Optional plugins
-    are opt-in (e.g. `schwab-mcp` needs per-user Schwab auth). Already-
-    installed optional plugins are always kept up to date.
+    Re-running `cass setup` is the canonical way to refresh credentials —
+    the per-device CF token + mcp_key both expire after 90 days; setup
+    auto-detects and re-auths.
     """
-    _run_setup_for_clients(client, includes, scope=scope)
+    _run_setup_for_clients(client, includes, scope=scope,
+                           device_name=device_name, force_reauth=reauth)
 
 
 @click.group()

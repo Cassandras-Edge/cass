@@ -79,11 +79,32 @@ def _is_reachable(url: str) -> bool:
         return False
 
 
+def _get_cf_service_token() -> tuple[str, str] | None:
+    """CF Access service token (Client ID + Secret) from env or local env files.
+
+    Set as a pair: CF_ACCESS_CLIENT_ID + CF_ACCESS_CLIENT_SECRET.
+    Mints once via Terraform (cassandra-infra), set in shell profile
+    forever after. Bypasses the interactive WorkOS login flow entirely
+    and never expires unless rotated.
+    """
+    local = _read_local_env()
+    cid = os.environ.get("CF_ACCESS_CLIENT_ID") or local.get("CF_ACCESS_CLIENT_ID")
+    csec = os.environ.get("CF_ACCESS_CLIENT_SECRET") or local.get("CF_ACCESS_CLIENT_SECRET")
+    if cid and csec:
+        return cid, csec
+    return None
+
+
 def require_auth() -> tuple[str, dict[str, str]]:
     """Get base URL and auth headers for API calls.
 
-    Tries direct auth service first (AUTH_SECRET + reachable URL),
-    falls back to portal with cached MCP key.
+    Auth resolution order:
+      1. Direct mode: AUTH_SECRET + auth URL reachable (in-cluster / dev).
+      2. Service token mode: CF_ACCESS_CLIENT_ID + CF_ACCESS_CLIENT_SECRET
+         set in env. Long-lived, never prompts, machine-friendly.
+      3. Portal mode: cached MCP key + interactive WorkOS-backed CF cookie
+         from `cass login`. Last resort — short-lived, requires browser.
+
     Returns (base_url, headers).
     """
     # Direct mode: AUTH_SECRET available and auth URL reachable (dev/cluster)
@@ -93,13 +114,30 @@ def require_auth() -> tuple[str, dict[str, str]]:
         if _is_reachable(auth_url):
             return auth_url, {"X-Auth-Secret": secret, "Content-Type": "application/json"}
 
+    # Service-token mode: prefer over WorkOS interactive flow when env is set.
+    portal = get_portal_url()
+    if (svc := _get_cf_service_token()) is not None:
+        cid, csec = svc
+        # Still need a Bearer for the inner auth check on credential routes;
+        # service token covers the CF Access edge, MCP key covers the API call.
+        from cass.ensure import get_service_key  # noqa: PLC0415
+        # Try cached key for a stable default service.
+        bearer = get_service_key("perplexity-mcp") or get_service_key("market-research") or ""
+        headers: dict[str, str] = {
+            "CF-Access-Client-Id": cid,
+            "CF-Access-Client-Secret": csec,
+            "Content-Type": "application/json",
+        }
+        if bearer:
+            headers["Authorization"] = f"Bearer {bearer}"
+        return portal, headers
+
     # Portal mode: cached MCP key + CF Access JWT from `cass login`
     from cass.auth import ensure_auth  # noqa: PLC0415
 
     auth = ensure_auth()
 
-    portal = get_portal_url()
-    headers: dict[str, str] = {
+    headers = {
         "Authorization": f"Bearer {auth['key']}",
         "Content-Type": "application/json",
     }

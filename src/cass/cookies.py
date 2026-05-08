@@ -320,6 +320,84 @@ def _sync_service(name: str, svc: dict, dry_run: bool, no_open: bool = False) ->
     click.echo(f"  Synced: {keys} ✓")
 
 
+def _read_cookie_from_sqlite(domain_like: str, name: str) -> tuple[str, int] | None:
+    """Read a single cookie's (value, expiry) from Firefox SQLite without locking it."""
+    db_path = _find_firefox_cookies_db()
+    if not db_path:
+        return None
+    tmp = tempfile.mktemp(suffix=".sqlite")
+    shutil.copy2(db_path, tmp)
+    try:
+        conn = sqlite3.connect(tmp)
+        row = conn.execute(
+            "SELECT value, expiry FROM moz_cookies WHERE host LIKE ? AND name = ? LIMIT 1",
+            (domain_like, name),
+        ).fetchone()
+        conn.close()
+        return (row[0], row[1]) if row else None
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+@cookies.command()
+@click.argument("services", nargs=-1)
+@click.option("--timeout", default=30, type=int,
+              help="Seconds to wait for Firefox to refresh Cloudflare cookies.")
+@click.option("--force", is_flag=True, help="Open Firefox even if cookies look fresh.")
+def refresh(services: tuple[str, ...], timeout: int, force: bool) -> None:
+    """Background-refresh Cloudflare-gated cookies, then sync.
+
+    Opens the service's probe URL in Firefox without raising the window, waits
+    for the Cloudflare clearance cookie (cf_clearance) to update, then runs the
+    normal `cass cookies sync` flow. Designed for unattended use via launchd
+    (set-and-forget perplexity cookie freshness).
+
+    Currently meaningful for services with Cloudflare bot protection
+    (perplexity-mcp). Other services are passed through to plain sync.
+    """
+    targets = list(services) if services else ["perplexity-mcp"]
+    for name in targets:
+        if name not in SERVICES:
+            click.echo(f"Unknown service: {name}")
+            continue
+        svc = SERVICES[name]
+        click.echo(f"\n── refresh {name} ──")
+
+        # Snapshot current cf_clearance (only meaningful for cloudflare-gated svcs).
+        before = _read_cookie_from_sqlite("%perplexity.ai", "cf_clearance") if name == "perplexity-mcp" else None
+        if before and not force:
+            value, expiry = before
+            ttl = expiry - int(time.time())
+            if ttl > 3600:
+                click.echo(f"  cf_clearance still has {ttl // 60} min left — running sync.")
+                _sync_service(name, svc, dry_run=False, no_open=True)
+                continue
+
+        click.echo(f"  Opening {svc['probe_url']} in background Firefox...")
+        subprocess.run(["open", "-a", "Firefox", "-g", svc["probe_url"]],
+                       capture_output=True)
+
+        # Poll cookies.sqlite until cf_clearance value changes (or timeout).
+        deadline = time.time() + timeout
+        refreshed = False
+        while time.time() < deadline:
+            time.sleep(2)
+            now = _read_cookie_from_sqlite("%perplexity.ai", "cf_clearance")
+            if now and (before is None or now[0] != before[0]):
+                refreshed = True
+                break
+
+        if refreshed:
+            click.echo("  cf_clearance refreshed.")
+        else:
+            click.echo(f"  WARN: no cf_clearance change in {timeout}s — syncing what we have.", err=True)
+
+        _sync_service(name, svc, dry_run=False, no_open=True)
+
+
 @cookies.command()
 def status() -> None:
     """Check which services have valid cookies in Firefox (fast, no network)."""

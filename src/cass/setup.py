@@ -11,7 +11,7 @@ from pathlib import Path
 import click
 
 from cass.patched_cli import _install_prebuilt
-from cass.refresh_keys import PLUGIN_SERVICES, _fetch_new_key, _load_settings, _save_service_key, _save_settings, _write_plugin_option, get_service_key
+from cass.refresh_keys import PLUGIN_SERVICES, _load_settings, _save_settings, _write_plugin_option
 
 
 CODEX_ENV_PATH = Path.home() / ".config" / "cass" / "codex-mcp.env"
@@ -284,12 +284,22 @@ def _upsert_codex_server(name: str, url: str, env_var: str) -> None:
 def _sync_codex(install_missing: bool, opt_in: set[str]) -> None:
     click.echo("Syncing Codex MCP servers...")
 
-    from cass.auth import ensure_auth  # noqa: PLC0415
+    import os  # noqa: PLC0415
+    universal_key = os.environ.get("CASS_MCP_KEY", "")
+    if not universal_key:
+        raise click.ClickException(
+            "CASS_MCP_KEY not set in env. Run `cass login`, then "
+            "`source ~/.cass/env`, then re-run setup."
+        )
 
     touched: list[str] = []
     skipped_optional: list[str] = []
     env_updates: dict[str, str] = {}
-    auth: dict | None = None
+
+    # All servers share one bearer token — the per-device CASS_MCP_KEY.
+    # We still register each server with its own env-var name (CASS_MCP_KEY)
+    # so codex can resolve it consistently across servers.
+    UNIVERSAL_ENV_VAR = "CASS_MCP_KEY"
 
     for name, meta in CODEX_SERVERS.items():
         exists = _codex_has_server(name)
@@ -300,21 +310,9 @@ def _sync_codex(install_missing: bool, opt_in: set[str]) -> None:
         if not exists and not install_missing:
             continue
 
-        if auth is None:
-            auth = ensure_auth()
-
-        service = meta["service"]
-        key = get_service_key(service)
-        if not key:
-            click.echo(f"Creating key for {service}...")
-            key = _fetch_new_key(service, auth)
-            _save_service_key(service, key, auth.get("email", ""))
-        else:
-            click.echo(f"Using cached key for {service}...")
-
-        env_var = _codex_env_var(service)
-        env_updates[env_var] = key
-        _upsert_codex_server(name, _codex_url(meta["subdomain"]), env_var)
+        click.echo(f"Configuring {name} → {meta['subdomain']}...")
+        env_updates[UNIVERSAL_ENV_VAR] = universal_key
+        _upsert_codex_server(name, _codex_url(meta["subdomain"]), UNIVERSAL_ENV_VAR)
         touched.append(name)
 
     if skipped_optional:
@@ -528,31 +526,31 @@ def _read_installed_plugins_by_scope() -> dict[str, str]:
 
 
 def _populate_mcp_keys(plugins: list[str]) -> None:
-    from cass.auth import ensure_auth  # noqa: PLC0415 — avoid import cycle on `cass --version`
-    import httpx  # noqa: PLC0415
+    """Write the user's per-device mcp_key into each plugin's user_config.
+
+    Post-redesign: keys are per-DEVICE, not per-service. `cass login` writes
+    a single mcp_key to ~/.cass/env (as CASS_MCP_KEY); we copy that same
+    value into all plugin manifests' ${user_config.mcpKey}.
+    """
+    import os  # noqa: PLC0415
     needs_keys = [p for p in plugins if p in PLUGIN_SERVICES]
     if not needs_keys:
         return
-    auth = ensure_auth()
+
+    universal_key = os.environ.get("CASS_MCP_KEY", "")
+    if not universal_key:
+        click.echo(
+            "  warning: CASS_MCP_KEY not set in env — run `cass login` to mint a "
+            "per-device key, then re-run setup.",
+            err=True,
+        )
+        return
+
     settings = _load_settings()
     for plugin in needs_keys:
-        service = PLUGIN_SERVICES[plugin]
-        key = get_service_key(service)
-        if not key:
-            try:
-                click.echo(f"  creating key for {service}...")
-                key = _fetch_new_key(service, auth)
-                _save_service_key(service, key, auth.get("email", ""))
-            except httpx.HTTPStatusError as e:
-                click.echo(f"  warning: could not provision {service}: {e.response.status_code}", err=True)
-                continue
-            except Exception as e:  # noqa: BLE001
-                click.echo(f"  warning: could not provision {service}: {e}", err=True)
-                continue
-        else:
-            click.echo(f"  using cached key for {service}")
-        _write_plugin_option(settings, plugin, "mcpKey", key)
+        _write_plugin_option(settings, plugin, "mcpKey", universal_key)
     _save_settings(settings)
+    click.echo(f"  wrote per-device mcp_key to {len(needs_keys)} plugin(s)")
 
 
 # ---------- teardown (inverse of setup) ----------

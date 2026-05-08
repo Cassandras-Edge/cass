@@ -70,24 +70,33 @@ def ensure_auth() -> dict:
     return auth
 
 
-def _run_login_flow() -> None:
-    """Open browser for OAuth login and wait for callback."""
+def _run_login_flow(device_name: str | None = None) -> None:
+    """Open browser for OAuth login and wait for callback.
+
+    Portal mints a per-device CF Access service token + per-device mcp_key
+    during this flow. Both are passed back via the localhost callback and
+    written to ~/.cass/env (so cass + plugin manifests use them) plus the
+    legacy ~/.config/cass/auth.json (CF cookie compat during migration).
+    """
+    import socket  # noqa: PLC0415
+    from cass.cli_auth import (  # noqa: PLC0415 — avoid circular import on cli boot
+        ENV_PATH, ensure_zprofile_sources_env, write_env_file,
+    )
+
     result: dict = {}
+    name = (device_name or socket.gethostname().split(".")[0])[:64]
 
     class CallbackHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
             params = parse_qs(parsed.query)
+            for k in ("key", "email", "cf_token", "device_id", "device_name",
+                      "cf_client_id", "cf_client_secret"):
+                v = params.get(k, [None])[0]
+                if v is not None:
+                    result[k] = v
 
-            key = params.get("key", [None])[0]
-            email = params.get("email", [None])[0]
-            cf_token = params.get("cf_token", [None])[0]
-
-            if key and email:
-                result["key"] = key
-                result["email"] = email
-                if cf_token:
-                    result["cf_token"] = cf_token
+            if result.get("key") and result.get("email"):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html")
                 self.end_headers()
@@ -108,20 +117,42 @@ def _run_login_flow() -> None:
     server = HTTPServer(("127.0.0.1", 0), CallbackHandler)
     port = server.server_address[1]
     callback_url = f"http://localhost:{port}/callback"
-    login_url = f"{get_portal_url()}/api/cli/login?callback={callback_url}"
+    login_url = (
+        f"{get_portal_url()}/api/cli/login"
+        f"?callback={callback_url}&device={name}"
+    )
 
-    click.echo(f"Opening browser for login...")
+    click.echo(f"Opening browser for login (device: {name})...")
     click.echo(f"If it doesn't open, visit: {login_url}")
     webbrowser.open(login_url)
 
     server.handle_request()
     server.server_close()
 
-    if result.get("key"):
-        save_auth(result["key"], result["email"], result.get("cf_token"))
-        click.echo(f"Logged in as {result['email']}")
-    else:
+    if not result.get("key"):
         raise click.ClickException("Login failed — no key received")
+
+    # Save legacy auth.json for compat with code paths still using cf_token cookie.
+    save_auth(result["key"], result["email"], result.get("cf_token"))
+
+    # Write the env file (CF service-token + per-device mcp_key) — this is
+    # the path going forward. Portal includes cf_client_id/secret only when
+    # PORTAL_ACCESS_APP_ID is configured; if it's missing we skip silently
+    # and fall back to the legacy CF cookie path.
+    if result.get("cf_client_id") and result.get("cf_client_secret"):
+        write_env_file({
+            "email": result["email"],
+            "device_name": result.get("device_name", name),
+            "cf_access_client_id": result["cf_client_id"],
+            "cf_access_client_secret": result["cf_client_secret"],
+            "mcp_key": result["key"],
+        })
+        added = ensure_zprofile_sources_env()
+        click.echo(f"  Credentials → {ENV_PATH}")
+        if added:
+            click.echo(f"  Added 'source {ENV_PATH}' to ~/.zprofile")
+
+    click.echo(f"Logged in as {result['email']}")
 
 
 def save_auth(key: str, email: str, cf_token: str | None = None) -> None:

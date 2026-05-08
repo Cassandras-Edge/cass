@@ -197,7 +197,15 @@ def _validate_cookies_b64(cookies_b64: str, probe_url: str) -> tuple[bool, str]:
 
 
 def _push_credentials(service: str, credentials: dict[str, str]) -> None:
-    """Push credentials to auth service."""
+    """Push credentials to the auth service, then verify they round-trip.
+
+    A 200 response from the PUT isn't enough — we've seen the auth-side
+    return success while the credential failed to persist (or persisted
+    under a different email than expected). After the PUT we GET the
+    same path back and assert each pushed key is present with the
+    pushed value, so callers fail loudly instead of silently breaking
+    the upstream service.
+    """
     base_url, headers = require_auth()
     email = get_default_email()
 
@@ -210,6 +218,28 @@ def _push_credentials(service: str, credentials: dict[str, str]) -> None:
 
     resp = httpx.put(url, headers=headers, json=body, timeout=15)
     resp.raise_for_status()
+
+    # Read-back verify. The portal route returns the credentials object
+    # directly; the direct-auth route wraps it in {"credentials": {...}}.
+    try:
+        verify = httpx.get(url, headers=headers, timeout=15)
+        verify.raise_for_status()
+        got = verify.json()
+        if isinstance(got, dict) and "credentials" in got:
+            stored = got.get("credentials") or {}
+        else:
+            stored = got or {}
+        missing = [k for k, v in credentials.items() if stored.get(k) != v]
+        if missing:
+            raise click.ClickException(
+                f"PUT to {url} returned 200 but read-back is missing/mismatched "
+                f"keys: {', '.join(missing)}. Auth and portal may be out of sync, "
+                f"or the email scope differs from {email}."
+            )
+    except httpx.HTTPError as exc:
+        raise click.ClickException(
+            f"PUT to {url} succeeded but verify GET failed: {exc}"
+        ) from exc
 
 
 @click.group()

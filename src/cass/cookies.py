@@ -46,6 +46,15 @@ SERVICES = {
         "probe_url": "https://claude.ai",
         "description": "Claude.ai session cookies",
     },
+    "perplexity-mcp": {
+        "credential_key": "perplexity_cookies",
+        "domains": [".perplexity.ai", "www.perplexity.ai"],
+        "login_url": "https://www.perplexity.ai/finance/AAPL",
+        "probe_url": "https://www.perplexity.ai/finance/AAPL",
+        "description": "Perplexity Finance cookies (cf_clearance + session)",
+        "required_cookies": ["cf_clearance"],
+        "skip_validate": True,
+    },
 }
 
 
@@ -216,7 +225,7 @@ def cookies() -> None:
 def sync(services: tuple[str, ...], dry_run: bool, no_open: bool) -> None:
     """Sync browser cookies to services.
 
-    Specify service names (yt-mcp, twitter, claude-ai) or omit for all.
+    Specify service names (yt-mcp, twitter, claude-ai, perplexity-mcp) or omit for all.
     Opens login pages automatically if cookies are missing (unless --no-open).
     """
     ytdlp = shutil.which("yt-dlp")
@@ -269,9 +278,11 @@ def _sync_service(name: str, svc: dict, dry_run: bool, no_open: bool = False) ->
             return
         creds = {svc["credential_key"]: _lines_to_jar_b64(filtered)}
 
-    # Validate cookie jar before pushing (yt-mcp, claude-ai — full jar mode)
+    # Validate cookie jar before pushing (yt-mcp, claude-ai — full jar mode).
+    # Services behind Cloudflare bot protection (perplexity) opt out via
+    # skip_validate — yt-dlp can't get past Turnstile to validate.
     cred_key = svc.get("credential_key", "")
-    if cred_key in creds and svc.get("probe_url"):
+    if cred_key in creds and svc.get("probe_url") and not svc.get("skip_validate"):
         click.echo("  Validating cookies...")
         ok, detail = _validate_cookies_b64(creds[cred_key], svc["probe_url"])
         if ok:
@@ -279,6 +290,23 @@ def _sync_service(name: str, svc: dict, dry_run: bool, no_open: bool = False) ->
         else:
             click.echo(f"  INVALID — {detail}", err=True)
             _prompt_login("Cookies are stale or logged out.")
+            return
+
+    # For skip_validate services, sanity-check the required cookies are present
+    # in the extracted jar before pushing.
+    if svc.get("skip_validate") and svc.get("required_cookies"):
+        jar_b64 = creds.get(cred_key, "")
+        try:
+            jar_text = base64.b64decode(jar_b64).decode()
+        except Exception:
+            jar_text = ""
+        missing = [
+            n for n in svc["required_cookies"]
+            if not any(f"\t{n}\t" in line for line in jar_text.splitlines())
+        ]
+        if missing:
+            click.echo(f"  MISSING required cookies: {', '.join(missing)}", err=True)
+            _prompt_login(f"Visit {svc['probe_url']} in Firefox to get a fresh cf_clearance.")
             return
 
     if dry_run:

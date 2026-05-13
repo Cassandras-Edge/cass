@@ -31,8 +31,8 @@ var Services = []Service{
 	// ── Default (installed unconditionally) ──
 	{Name: "gmail-mcp", Repo: "Cassandras-Edge/cassandra-gmail-mcp"},
 	{Name: "yt-mcp", Repo: "Cassandras-Edge/cassandra-media-mcp"},
-	{Name: "twitter-mcp", Repo: "Cassandras-Edge/cassandra-twitter-mcp"},
-	{Name: "reddit-mcp", Repo: "Cassandras-Edge/cassandra-reddit-mcp"},
+	{Name: "twitter-mcp", Repo: "Cassandras-Edge/twitter-mcp"},
+	{Name: "reddit-mcp", Repo: "Cassandras-Edge/reddit-mcp"},
 	{Name: "discord-mcp", Repo: "Cassandras-Edge/cassandra-discord-mcp"},
 	{Name: "market-research", Repo: "Cassandras-Edge/cassandra-market-research"},
 

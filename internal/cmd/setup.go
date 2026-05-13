@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -15,23 +14,14 @@ import (
 
 	"github.com/Cassandras-Edge/cass/internal/auth"
 	"github.com/Cassandras-Edge/cass/internal/portal"
+	"github.com/Cassandras-Edge/cass/internal/registry"
 )
 
-const (
-	marketplaceRepo = "Cassandras-Edge/cassandra-marketplace"
-)
-
-// Default Claude plugins installed by `cass setup`.
-var defaultClaudePlugins = []string{
-	"media-mcp", "twitter-mcp", "reddit-mcp", "discord-mcp", "market-research",
-	"share-convo",
-}
-
-// Opt-in Claude plugins (via --with NAME or --with all).
-var optionalClaudePlugins = []string{
-	"stopgate", "claudeai-mcp", "gemini-mcp", "perplexity-mcp", "routines-mcp",
-	"cass-image", "tradingview-mcp", "schwab-mcp",
-}
+// ─── codex server registry (independent of the Claude path) ────────────────
+//
+// Codex setup writes ~/.codex/config.toml directly with bearer tokens
+// inline — no marketplace, no plugin layer. This is the model the Claude
+// side now follows too via internal/manifest + internal/claudecfg.
 
 type codexServerSpec struct {
 	Service   string
@@ -51,10 +41,11 @@ var codexServers = map[string]codexServerSpec{
 	"tradingview-mcp": {"tradingview-mcp", "tradingview-mcp"},
 	"routines":        {"routines", "routines-mcp"},
 	"schwab-mcp":      {"schwab-mcp", "schwab"},
+	"gmail-mcp":       {"gmail-mcp", "gmail-mcp"},
 }
 
 var defaultCodexServers = []string{
-	"yt-mcp", "discord-mcp", "twitter-mcp", "market-research", "reddit-mcp",
+	"yt-mcp", "discord-mcp", "twitter-mcp", "market-research", "reddit-mcp", "gmail-mcp",
 }
 
 var optionalCodexServers = []string{
@@ -62,16 +53,7 @@ var optionalCodexServers = []string{
 	"tradingview-mcp", "schwab-mcp",
 }
 
-// codexScopeChoices mirrors the user/project distinction Claude already has.
-// We deliberately omit "local" — codex has no equivalent of Claude's
-// settings.local.json layer.
 var codexScopeChoices = []string{"user", "project"}
-
-func allClaudePlugins() []string {
-	out := append([]string{}, defaultClaudePlugins...)
-	out = append(out, optionalClaudePlugins...)
-	return out
-}
 
 // ─── setup ─────────────────────────────────────────────────────────────────
 
@@ -84,12 +66,12 @@ func setupCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "setup",
 		Short: "First-time Cassandra setup for Claude Code, Codex, or both",
-		Long: `Idempotent + interactive. Registers the Cassandra marketplace,
-installs/updates default plugins (+ any --with selections), writes the
-per-device mcp_key into every plugin's user_config, and (for Codex)
-adds MCP servers with the bearer-token env var wired up.
+		Long: `Idempotent + interactive. Fetches each service's cass-manifest.json
+from its GitHub repo, writes mcpServers entries into the chosen scope's
+settings.json (Claude) or config.toml (Codex), drops SKILL.md files, mints
+per-service MCP keys, and installs a SessionStart auto-update hook.
 
-Re-running setup is the canonical way to refresh credentials.`,
+Re-running setup is the canonical way to refresh manifests + rotate keys.`,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if err := validateChoice(client, []string{"auto", "claude", "codex", "both"}, "--client"); err != nil {
 				return err
@@ -101,8 +83,8 @@ Re-running setup is the canonical way to refresh credentials.`,
 		},
 	}
 	cmd.Flags().StringVar(&client, "client", "auto", "Which client to set up: auto | claude | codex | both")
-	cmd.Flags().StringVar(&scope, "scope", "project", "Claude plugin install scope: user | project | local")
-	cmd.Flags().StringSliceVar(&includes, "with", nil, "Enable an optional plugin (repeatable, comma-separated, or 'all')")
+	cmd.Flags().StringVar(&scope, "scope", "user", "Claude settings scope: user | project | local")
+	cmd.Flags().StringSliceVar(&includes, "with", nil, "Enable an optional service (repeatable, comma-separated, or 'all')")
 	cmd.Flags().StringVar(&deviceName, "device", "", "Device name to register (default: prompt with hostname)")
 	cmd.Flags().BoolVar(&reauth, "reauth", false, "Force a fresh device login even if creds look valid")
 	return cmd
@@ -113,49 +95,66 @@ func runSetup(client, scope string, includes []string, deviceName string, reauth
 	if err != nil {
 		return err
 	}
+
 	fmt.Println("Checking device authorization...")
 	if err := ensureDeviceAuthorized(deviceName, reauth); err != nil {
 		return err
 	}
-	fmt.Println()
 
-	allOptional := union(optionalClaudePlugins, optionalCodexServers)
-	optInClaude := resolveOptIns(includes, optionalClaudePlugins, allOptional)
+	// gh auth is required for manifest fetches on the Claude path.
+	if contains(clients, "claude") {
+		if err := ensureGhAuthed(); err != nil {
+			return err
+		}
+	}
+
+	// One-shot legacy cleanup: uninstall any cassandra-plugins entries
+	// `claude plugin install` left behind.
+	if contains(clients, "claude") {
+		claudePluginUninstall(false)
+	}
+
+	allOptional := union(optionalCodexServers, registryOptionalNames())
+	optInClaude := resolveOptIns(includes, registryOptionalNames(), allOptional)
 	optInCodex := resolveOptIns(includes, optionalCodexServers, allOptional)
 
 	if contains(clients, "claude") {
-		fmt.Println("Adding Cassandra marketplace...")
-		_ = runClaude("plugin", "marketplace", "add", marketplaceRepo)
-		if scope == "project" || scope == "local" {
-			if err := ensureMarketplaceInScopeSettings(scope); err != nil {
-				fmt.Fprintf(os.Stderr, "  warning: marketplace scope write: %v\n", err)
-			}
+		fmt.Println()
+		if err := syncClaudeDirect(scope, optInClaude, false, false); err != nil {
+			return err
 		}
 		if contains(clients, "codex") {
 			fmt.Println()
 		}
 	}
 
-	syncPlatform(true, client, optInClaude, optInCodex, scope)
+	if contains(clients, "codex") {
+		fmt.Println()
+		fmt.Println("Updating patched Claude CLI...")
+		if err := installPatchedPrebuilt(""); err != nil {
+			fmt.Fprintf(os.Stderr, "  warning: patched-cli install: %v\n", err)
+		}
+		syncCodex(true, optInCodex, codexScopeFor(scope))
+	}
 
 	fmt.Println()
 	if contains(clients, "claude") {
-		fmt.Println("Claude plugins (default):")
-		for _, p := range defaultClaudePlugins {
-			fmt.Printf("  - %s\n", p)
+		fmt.Println("Claude services (default):")
+		for _, s := range registry.Defaults() {
+			fmt.Printf("  - %s\n", s.Name)
 		}
-		if len(optionalClaudePlugins) > 0 {
+		if len(registry.Optionals()) > 0 {
 			fmt.Println("Optional (opt in with --with <name>):")
-			for _, p := range optionalClaudePlugins {
+			for _, s := range registry.Optionals() {
 				mark := " "
-				if contains(optInClaude, p) {
+				if contains(optInClaude, s.Name) {
 					mark = "✓"
 				}
-				fmt.Printf("  %s %s\n", mark, p)
+				fmt.Printf("  %s %s\n", mark, s.Name)
 			}
 		}
 		fmt.Println()
-		fmt.Println("Restart Claude Code to activate plugins.")
+		fmt.Println("Restart Claude Code to pick up the new MCP servers + skills.")
 	}
 	if contains(clients, "codex") {
 		if contains(clients, "claude") {
@@ -173,9 +172,10 @@ func teardownCmd() *cobra.Command {
 	var yes bool
 	cmd := &cobra.Command{
 		Use:   "teardown",
-		Short: "Remove Cassandra plugins / MCP servers (inverse of `cass setup`)",
-		Long: `Keeps the marketplace registration + generated env files so you can
-re-run setup cleanly. Does not uninstall cass itself.`,
+		Short: "Remove Cassandra MCP servers from settings (inverse of `cass setup`)",
+		Long: `Removes settings.json/config.toml entries cass installed. Skill files
+under ~/.claude/skills/ and cached service keys are also dropped. cass
+itself is not uninstalled.`,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if err := validateChoice(client, []string{"auto", "claude", "codex", "both"}, "--client"); err != nil {
 				return err
@@ -187,7 +187,7 @@ re-run setup cleanly. Does not uninstall cass itself.`,
 		},
 	}
 	cmd.Flags().StringVar(&client, "client", "auto", "Which client to tear down: auto | claude | codex | both")
-	cmd.Flags().StringVar(&scope, "scope", "project", "Claude plugin scope to remove from")
+	cmd.Flags().StringVar(&scope, "scope", "user", "Claude settings scope to clean")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Skip confirmation prompt")
 	return cmd
 }
@@ -200,13 +200,12 @@ func runTeardown(client, scope string, assumeYes bool) error {
 	if !assumeYes {
 		var targets []string
 		if contains(clients, "claude") {
-			targets = append(targets, fmt.Sprintf("Claude plugins (scope: %s)", scope))
+			targets = append(targets, fmt.Sprintf("Claude services (scope: %s)", scope))
 		}
 		if contains(clients, "codex") {
 			targets = append(targets, "Codex MCP servers (global)")
 		}
 		fmt.Printf("This will remove: %s.\n", strings.Join(targets, ", "))
-		fmt.Println("Marketplace registration + generated env files are kept.")
 		fmt.Print("Proceed? [y/N] ")
 		var resp string
 		fmt.Scanln(&resp)
@@ -218,7 +217,9 @@ func runTeardown(client, scope string, assumeYes bool) error {
 
 	var removedClaude, removedCodex []string
 	if contains(clients, "claude") {
-		removedClaude = teardownClaude(scope)
+		removedClaude, _ = teardownClaudeDirect(scope, false)
+		// Also clean up any legacy plugin installs.
+		claudePluginUninstall(false)
 		if contains(clients, "codex") {
 			fmt.Println()
 		}
@@ -228,7 +229,7 @@ func runTeardown(client, scope string, assumeYes bool) error {
 	}
 	fmt.Println()
 	if contains(clients, "claude") {
-		fmt.Printf("Claude: removed %d plugin(s)", len(removedClaude))
+		fmt.Printf("Claude: removed %d service(s)", len(removedClaude))
 		if len(removedClaude) > 0 {
 			fmt.Printf(" — %s", strings.Join(removedClaude, ", "))
 		}
@@ -260,7 +261,7 @@ func claudeSetupCmd() *cobra.Command {
 	var scope string
 	cmd := &cobra.Command{
 		Use:   "setup",
-		Short: "Set up the Cassandra Claude marketplace plugins",
+		Short: "Set up Cassandra MCP servers + skills in Claude Code settings",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if err := validateChoice(scope, scopeChoices, "--scope"); err != nil {
 				return err
@@ -268,7 +269,7 @@ func claudeSetupCmd() *cobra.Command {
 			return runSetup("claude", scope, nil, "", false)
 		},
 	}
-	cmd.Flags().StringVar(&scope, "scope", "project", "Plugin install scope")
+	cmd.Flags().StringVar(&scope, "scope", "user", "Settings scope")
 	return cmd
 }
 
@@ -277,7 +278,7 @@ func claudeTeardownCmd() *cobra.Command {
 	var yes bool
 	cmd := &cobra.Command{
 		Use:   "teardown",
-		Short: "Remove Cassandra Claude plugins",
+		Short: "Remove Cassandra entries from Claude Code settings",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if err := validateChoice(scope, scopeChoices, "--scope"); err != nil {
 				return err
@@ -285,7 +286,7 @@ func claudeTeardownCmd() *cobra.Command {
 			return runTeardown("claude", scope, yes)
 		},
 	}
-	cmd.Flags().StringVar(&scope, "scope", "project", "Plugin scope to remove from")
+	cmd.Flags().StringVar(&scope, "scope", "user", "Settings scope to remove from")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Skip confirmation prompt")
 	return cmd
 }
@@ -354,7 +355,7 @@ func resolveClients(client string) ([]string, error) {
 		clients = []string{client}
 	}
 	if len(clients) == 0 {
-		return nil, fmt.Errorf("neither claude nor codex CLI found in PATH")
+		return nil, errors.New("neither claude nor codex CLI found in PATH")
 	}
 	for _, c := range clients {
 		if _, err := exec.LookPath(c); err != nil {
@@ -362,6 +363,22 @@ func resolveClients(client string) ([]string, error) {
 		}
 	}
 	return clients, nil
+}
+
+func registryDefaultNames() []string {
+	out := []string{}
+	for _, s := range registry.Defaults() {
+		out = append(out, s.Name)
+	}
+	return out
+}
+
+func registryOptionalNames() []string {
+	out := []string{}
+	for _, s := range registry.Optionals() {
+		out = append(out, s.Name)
+	}
+	return out
 }
 
 func resolveOptIns(includes, optionalPool, knownPool []string) []string {
@@ -379,7 +396,7 @@ func resolveOptIns(includes, optionalPool, knownPool []string) []string {
 				continue
 			}
 			if !contains(knownPool, name) {
-				continue // silently skip names invalid for THIS client but valid elsewhere
+				continue
 			}
 			if contains(optionalPool, name) {
 				selected[name] = true
@@ -404,9 +421,6 @@ func ensureDeviceAuthorized(deviceName string, forceReauth bool) error {
 	needsLogin := forceReauth || err != nil || creds.MCPKey == ""
 
 	if !needsLogin {
-		// Probe portal for the key's expires_at. 401/403 → revoked or expired,
-		// must re-auth. <7 days remaining → re-auth proactively. Network error
-		// → silently proceed with whatever's in env (matches Python behavior).
 		if client, perr := portal.NewClient(); perr == nil {
 			if w, werr := client.Whoami(); werr == nil {
 				if expiringSoon(w.ExpiresAt) {
@@ -437,73 +451,18 @@ func ensureDeviceAuthorized(deviceName string, forceReauth bool) error {
 	return runLogin(nil, deviceName)
 }
 
-// expiringSoon returns true if expiresAt (RFC3339-ish) is empty (treat as
-// unknown — proceed), expired, or within expiryWarnDays of now.
 func expiringSoon(expiresAt string) bool {
 	if expiresAt == "" {
 		return false
 	}
 	t, err := time.Parse(time.RFC3339, expiresAt)
 	if err != nil {
-		// Try without trailing Z normalization
 		t, err = time.Parse("2006-01-02T15:04:05.000Z", expiresAt)
 		if err != nil {
 			return false
 		}
 	}
 	return time.Until(t) <= time.Duration(expiryWarnDays)*24*time.Hour
-}
-
-func runClaude(args ...string) error {
-	out, err := exec.Command("claude", args...).CombinedOutput()
-	if err != nil {
-		stderr := strings.TrimSpace(string(out))
-		if stderr != "" {
-			fmt.Fprintf(os.Stderr, "  warning: %s\n", stderr)
-		}
-		return err
-	}
-	return nil
-}
-
-func claudePluginsByScope() map[string]string {
-	if _, err := exec.LookPath("claude"); err != nil {
-		return map[string]string{}
-	}
-	out, err := exec.Command("claude", "plugin", "list", "--json").Output()
-	if err != nil {
-		return map[string]string{}
-	}
-	var entries []map[string]any
-	if err := json.Unmarshal(out, &entries); err != nil {
-		return map[string]string{}
-	}
-	result := map[string]string{}
-	for _, e := range entries {
-		id, _ := e["id"].(string)
-		scope, _ := e["scope"].(string)
-		if id != "" && scope != "" {
-			result[id] = scope
-		}
-	}
-	return result
-}
-
-func syncPlatform(installMissing bool, client string, optInClaude, optInCodex []string, scope string) {
-	clients, err := resolveClients(client)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "  warning: %v\n", err)
-		return
-	}
-	if contains(clients, "claude") {
-		syncClaude(installMissing, optInClaude, scope)
-	}
-	if contains(clients, "codex") {
-		if contains(clients, "claude") {
-			fmt.Println()
-		}
-		syncCodex(installMissing, optInCodex, codexScopeFor(scope))
-	}
 }
 
 // codexScopeFor maps the shared --scope flag to a codex-valid scope. Codex
@@ -519,91 +478,10 @@ func codexScopeFor(scope string) string {
 	}
 }
 
-func syncClaude(installMissing bool, optIn []string, scope string) {
-	fmt.Printf("Refreshing Claude marketplace (scope: %s)...\n", scope)
-	_ = runClaude("plugin", "marketplace", "update", "cassandra-plugins")
-
-	fmt.Println()
-	fmt.Println("Updating patched Claude CLI...")
-	// Inline the prebuilt install — same logic as `cass patched-cli install`.
-	if err := installPatchedPrebuilt(""); err != nil {
-		fmt.Fprintf(os.Stderr, "  warning: patched-cli install: %v\n", err)
-	}
-
-	installed := claudePluginsByScope()
-	var touched, skipped []string
-	for _, plugin := range allClaudePlugins() {
-		qualified := plugin + "@cassandra-plugins"
-		isOptional := contains(optionalClaudePlugins, plugin)
-		installedScope, isInstalled := installed[qualified]
-
-		if isInstalled {
-			fmt.Printf("Updating %s (scope: %s)...\n", plugin, installedScope)
-			_ = runClaude("plugin", "update", qualified, "--scope", installedScope)
-			touched = append(touched, plugin)
-		} else if isOptional && !contains(optIn, plugin) {
-			skipped = append(skipped, plugin)
-		} else if installMissing {
-			fmt.Printf("Enabling %s (scope: %s)...\n", plugin, scope)
-			_ = runClaude("plugin", "install", qualified, "--scope", scope)
-			touched = append(touched, plugin)
-		}
-	}
-
-	if len(skipped) > 0 {
-		fmt.Println()
-		fmt.Printf("Skipped optional: %s — enable with `cass setup --with <name>` (or `--with all`).\n", strings.Join(skipped, ", "))
-	}
-	if len(touched) == 0 {
-		fmt.Println()
-		fmt.Println("No Cassandra Claude plugins installed. Run `cass setup --client claude` to enable them.")
-		return
-	}
-	fmt.Println()
-	fmt.Println("Populating Claude MCP keys...")
-	if err := populateMCPKeys(touched); err != nil {
-		fmt.Fprintf(os.Stderr, "  warning: %v\n", err)
-		fmt.Fprintln(os.Stderr, "  Run `cass refresh-keys` manually to retry.")
-	}
-}
-
-func populateMCPKeys(plugins []string) error {
-	needsKey := []string{}
-	for _, p := range plugins {
-		if _, ok := pluginServices[p]; ok {
-			needsKey = append(needsKey, p)
-		}
-	}
-	if len(needsKey) == 0 {
-		return nil
-	}
-	creds, err := auth.Read()
-	if err != nil || creds.MCPKey == "" {
-		return fmt.Errorf("CASS_MCP_KEY not set in env — run `cass login`")
-	}
-	settings, err := loadSettings()
-	if err != nil {
-		return err
-	}
-	for _, plugin := range needsKey {
-		writePluginOption(settings, plugin, "mcpKey", creds.MCPKey)
-	}
-	if err := saveSettings(settings); err != nil {
-		return err
-	}
-	fmt.Printf("  wrote per-device mcp_key to %d plugin(s)\n", len(needsKey))
-	return nil
-}
-
-func codexURL(subdomain string) string {
-	return "https://" + subdomain + ".cassandrasedge.com/mcp"
-}
-
 // syncCodex mints per-service MCP keys (same flow as `cass refresh-keys`)
 // and writes them inline as `http_headers.Authorization = "Bearer <key>"`
 // in either ~/.codex/config.toml (scope=user) or <cwd>/.codex/config.toml
-// (scope=project). Codex picks them up at startup with no env sourcing —
-// the seamless equivalent of Claude's plugin user_config.mcpKey path.
+// (scope=project). Codex picks them up at startup with no env sourcing.
 func syncCodex(installMissing bool, optIn []string, scope string) {
 	fmt.Printf("Syncing Codex MCP servers (scope: %s)...\n", scope)
 
@@ -618,21 +496,12 @@ func syncCodex(installMissing bool, optIn []string, scope string) {
 		return
 	}
 
-	// Reuse the same portal client / projectID resolution refresh-keys does
-	// so the codex flow mints keys against the same project bucket and
-	// honors the user's default project.
 	client, perr := portal.NewClient()
 	if perr != nil {
 		fmt.Fprintf(os.Stderr, "  warning: %v (run `cass login`)\n", perr)
 		return
 	}
-	var projects []struct {
-		ID string `json:"id"`
-	}
-	projectID := "default"
-	if err := client.Get("/api/projects", &projects); err == nil && len(projects) > 0 {
-		projectID = projects[0].ID
-	}
+	projectID, _ := defaultProjectID(client)
 
 	existingServers, _ := cfg["mcp_servers"].(map[string]any)
 
@@ -654,9 +523,6 @@ func syncCodex(installMissing bool, optIn []string, scope string) {
 			continue
 		}
 
-		// Per-service key — cached unless near expiry or revoked. Mirrors
-		// the refresh-keys --if-near-expiry path so re-running setup is a
-		// cheap no-op when keys are healthy.
 		key := auth.GetServiceKey(meta.Service)
 		needsMint := key == ""
 		if !needsMint {
@@ -704,9 +570,6 @@ func syncCodex(installMissing bool, optIn []string, scope string) {
 		return
 	}
 
-	// Project scope side effects: trust the dir in the user config (so
-	// codex doesn't disable our project file at load time) and gitignore
-	// the .codex/ dir (the file holds bearer tokens).
 	if scope == "project" {
 		projectRoot := filepath.Dir(filepath.Dir(cfgPath))
 		if err := ensureCodexProjectTrust(projectRoot); err != nil {
@@ -722,62 +585,8 @@ func syncCodex(installMissing bool, optIn []string, scope string) {
 	fmt.Println("No env-var sourcing needed — bearer tokens live inline. Restart Codex to pick up the new config.")
 }
 
-func ensureMarketplaceInScopeSettings(scope string) error {
-	var path string
-	cwd, _ := os.Getwd()
-	switch scope {
-	case "project":
-		path = filepath.Join(cwd, ".claude", "settings.json")
-	case "local":
-		path = filepath.Join(cwd, ".claude", "settings.local.json")
-	default:
-		return nil
-	}
-	data := map[string]any{}
-	if b, err := os.ReadFile(path); err == nil {
-		_ = json.Unmarshal(b, &data)
-	}
-	marketplaces, _ := data["extraKnownMarketplaces"].(map[string]any)
-	if marketplaces == nil {
-		marketplaces = map[string]any{}
-		data["extraKnownMarketplaces"] = marketplaces
-	}
-	entry := map[string]any{
-		"source": map[string]any{"source": "github", "repo": marketplaceRepo},
-	}
-	if existing, ok := marketplaces[marketplaceName].(map[string]any); ok {
-		if existingSource, ok := existing["source"].(map[string]any); ok {
-			if existingSource["source"] == "github" && existingSource["repo"] == marketplaceRepo {
-				return nil
-			}
-		}
-	}
-	marketplaces[marketplaceName] = entry
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	out, _ := json.MarshalIndent(data, "", "  ")
-	if err := os.WriteFile(path, append(out, '\n'), 0o644); err != nil {
-		return err
-	}
-	fmt.Printf("  wrote marketplace to %s\n", path)
-	return nil
-}
-
-func teardownClaude(scope string) []string {
-	installed := claudePluginsByScope()
-	var removed []string
-	for _, plugin := range allClaudePlugins() {
-		qualified := plugin + "@cassandra-plugins"
-		if installed[qualified] != scope {
-			continue
-		}
-		fmt.Printf("Removing %s (scope: %s)...\n", plugin, scope)
-		if err := runClaude("plugin", "uninstall", qualified, "--scope", scope); err == nil {
-			removed = append(removed, plugin)
-		}
-	}
-	return removed
+func codexURL(subdomain string) string {
+	return "https://" + subdomain + ".cassandrasedge.com/mcp"
 }
 
 // teardownCodex strips Cassandra mcp_servers entries from the scope-appropriate
@@ -811,15 +620,16 @@ func teardownCodex(scope string) []string {
 	return removed
 }
 
-// installPatchedPrebuilt is called from syncClaude — same logic as the
-// patched-cli install command, factored out so setup can call it directly.
+// installPatchedPrebuilt downloads the latest claude-patched binary for
+// the host platform. Same logic as `cass patched-cli install`, kept here
+// so setup can call it directly.
 func installPatchedPrebuilt(releaseTag string) error {
 	target, err := patchedHostTarget()
 	if err != nil {
 		return err
 	}
 	if _, err := exec.LookPath("gh"); err != nil {
-		return fmt.Errorf("gh CLI not found (skipping patched-cli install)")
+		return errors.New("gh CLI not found (skipping patched-cli install)")
 	}
 	binPath := patchedBinPath()
 	if err := os.MkdirAll(filepath.Dir(binPath), 0o755); err != nil {
@@ -875,4 +685,3 @@ func union(a, b []string) []string {
 	sort.Strings(out)
 	return out
 }
-

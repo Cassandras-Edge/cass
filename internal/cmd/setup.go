@@ -120,7 +120,10 @@ func runSetup(client, scope string, includes []string, deviceName string, reauth
 
 	if contains(clients, "claude") {
 		fmt.Println()
-		if err := syncClaudeDirect(scope, optInClaude, false, false); err != nil {
+		// cass setup is an explicit user action — always fetch fresh
+		// manifests, ignoring the per-service 1h cache. The cache is
+		// for hook-driven invocations like cass refresh-keys.
+		if err := syncClaudeDirect(scope, optInClaude, true, false); err != nil {
 			return err
 		}
 		if contains(clients, "codex") {

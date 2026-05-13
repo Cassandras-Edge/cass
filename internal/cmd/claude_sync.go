@@ -106,6 +106,13 @@ func syncClaudeDirect(scope string, optIn []string, force bool, quiet bool) erro
 			} else {
 				logf("  skill:  ~/.claude/skills/%s/SKILL.md (unchanged)\n", svc.Name)
 			}
+		} else {
+			// Manifest declares no skill — drop any stale local file. Services
+			// drop the skill field once their MCP server's instructions are
+			// good enough on their own.
+			if removed, _ := claudecfg.RemoveSkill(svc.Name); removed {
+				logf("  skill:  removed (manifest no longer ships one)\n")
+			}
 		}
 
 		if m.CookieSync != "" {

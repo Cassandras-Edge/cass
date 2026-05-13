@@ -31,8 +31,13 @@ type Manifest struct {
 	// best-effort on every Claude Code session.
 	CookieSync string `json:"cookieSync,omitempty"`
 
-	// Skill, if set, tells cass where to find the markdown body in the
-	// repo. Default path is "SKILL.md" at repo root.
+	// Skill, if set, tells cass to drop a SKILL.md into
+	// ~/.claude/skills/<name>/ from the repo. Optional and usually
+	// unnecessary for pure-MCP services — the MCP server's own
+	// `instructions` string already flows to the model. Useful when the
+	// service has no MCP component (slash-command-only plugins) or
+	// wants to advertise itself in the system-prompt skills list before
+	// any MCP session has initialized.
 	Skill *SkillConfig `json:"skill,omitempty"`
 }
 

@@ -27,35 +27,46 @@ const nearExpiryDays = 7
 
 func refreshKeysCmd() *cobra.Command {
 	var (
-		force          bool
-		serviceFilter  string
-		ifNearExpiry   bool
+		force         bool
+		serviceFilter string
+		ifNearExpiry  bool
+		quiet         bool
 	)
 	cmd := &cobra.Command{
 		Use:   "refresh-keys",
-		Short: "Rotate MCP bearer tokens in ~/.claude/settings.json (and Codex config)",
+		Short: "Rotate MCP bearer tokens in ~/.claude/settings.json and ~/.codex + project .codex configs",
 		Long: `Rotates per-service MCP keys for every Cassandra service registered
-in the user-scope settings.json. Reuses cached keys when healthy;
-re-mints when revoked or near expiry.
+in the user-scope settings.json. Also walks the user-scope codex
+config (~/.codex/config.toml) plus <cwd>/.codex/config.toml when
+present, refreshing inline Authorization headers there too.
+
+Reuses cached keys when healthy; re-mints when revoked or near expiry.
 
 With --if-near-expiry, only rotates keys whose expiry is within 7 days.
-Designed for a Claude Code SessionStart hook — fast no-op when keys are
+Designed for the cass claude/codex wrappers — fast no-op when keys are
 healthy, self-heals when they're about to expire.
 
 Note: this rotates tokens only. Use 'cass setup' to also refresh
 manifests + skills.`,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return runRefreshKeys(force, serviceFilter, ifNearExpiry)
+			return runRefreshKeys(force, serviceFilter, ifNearExpiry, quiet)
 		},
 	}
 	cmd.Flags().BoolVar(&force, "force", false, "Re-mint every key, ignoring the local cache")
 	cmd.Flags().StringVar(&serviceFilter, "service", "", "Rotate only this service")
 	cmd.Flags().BoolVar(&ifNearExpiry, "if-near-expiry", false,
-		"Only rotate keys whose expiry is within 7 days (SessionStart-hook friendly)")
+		"Only rotate keys whose expiry is within 7 days (wrapper-friendly)")
+	cmd.Flags().BoolVar(&quiet, "quiet", false, "Suppress non-error output (for backgrounded invocations)")
 	return cmd
 }
 
-func runRefreshKeys(force bool, serviceFilter string, ifNearExpiry bool) error {
+func runRefreshKeys(force bool, serviceFilter string, ifNearExpiry, quiet bool) error {
+	logf := func(format string, args ...any) {
+		if !quiet {
+			fmt.Printf(format, args...)
+		}
+	}
+
 	if serviceFilter != "" && registry.Find(serviceFilter) == nil {
 		known := make([]string, 0, len(registry.Services))
 		for _, s := range registry.Services {
@@ -76,6 +87,12 @@ func runRefreshKeys(force bool, serviceFilter string, ifNearExpiry bool) error {
 		return err
 	}
 
+	// freshKeys captures every key minted/cached this run, keyed by
+	// service name. The codex rewrite pass below uses this to patch
+	// inline Authorization headers in ~/.codex/config.toml and any
+	// project-local .codex/config.toml without re-hitting the portal.
+	freshKeys := map[string]string{}
+
 	type result struct {
 		service string
 		source  string
@@ -88,9 +105,13 @@ func runRefreshKeys(force bool, serviceFilter string, ifNearExpiry bool) error {
 		if serviceFilter != "" && svc.Name != serviceFilter {
 			continue
 		}
-		// Only rotate for services already registered in settings.json
-		// (don't accidentally install a service the user didn't opt in to).
-		if !claudecfg.HasMCPServer(settings, svc.Name) {
+		// Rotate keys for any service that's registered EITHER in
+		// settings.json (Claude) or in some codex config we can see —
+		// not just Claude. Otherwise codex-only setups never get their
+		// keys rotated.
+		registeredClaude := claudecfg.HasMCPServer(settings, svc.Name)
+		registeredCodex := codexRegisteredAnywhere(svc.Name)
+		if !registeredClaude && !registeredCodex {
 			continue
 		}
 
@@ -102,13 +123,13 @@ func runRefreshKeys(force bool, serviceFilter string, ifNearExpiry bool) error {
 					reason, refresh := keyNeedsRefresh(client, cached)
 					if refresh {
 						key, source = "", ""
-						fmt.Printf("Re-minting %s key (%s)...\n", svc.Name, reason)
+						logf("Re-minting %s key (%s)...\n", svc.Name, reason)
 					}
 				}
 			}
 		}
 		if key == "" {
-			fmt.Printf("Creating key for %s...\n", svc.Name)
+			logf("Creating key for %s...\n", svc.Name)
 			k, err := mintKey(client, projectID, svc.Name)
 			if err != nil {
 				results = append(results, result{service: svc.Name, err: err})
@@ -121,29 +142,34 @@ func runRefreshKeys(force bool, serviceFilter string, ifNearExpiry bool) error {
 			key, source = k, "new"
 		}
 
-		// Refresh the Authorization header in place — preserve existing URL.
-		bundle, _ := manifest.Fetch(svc.Repo, svc.Name, false)
-		url := ""
-		if bundle != nil && bundle.Manifest.HasMCP() {
-			url = bundle.Manifest.MCP.URL
-		} else {
-			// Fall back to URL from settings if manifest fetch failed
-			url = existingMCPURL(settings, svc.Name)
+		freshKeys[svc.Name] = key
+
+		if registeredClaude {
+			// Refresh the Claude Authorization header in place.
+			bundle, _ := manifest.Fetch(svc.Repo, svc.Name, false)
+			url := ""
+			if bundle != nil && bundle.Manifest.HasMCP() {
+				url = bundle.Manifest.MCP.URL
+			} else {
+				url = existingMCPURL(settings, svc.Name)
+			}
+			if url != "" {
+				claudecfg.UpsertMCPServer(settings, svc.Name, claudecfg.MCPServerSpec{
+					Type: "http",
+					URL:  url,
+					Headers: map[string]string{
+						"Authorization": "Bearer " + key,
+					},
+				})
+			} else if !registeredCodex {
+				results = append(results, result{
+					service: svc.Name,
+					err:     errors.New("no URL available — re-run `cass setup` to register"),
+				})
+				continue
+			}
 		}
-		if url == "" {
-			results = append(results, result{
-				service: svc.Name,
-				err:     errors.New("no URL available — re-run `cass setup` to register"),
-			})
-			continue
-		}
-		claudecfg.UpsertMCPServer(settings, svc.Name, claudecfg.MCPServerSpec{
-			Type: "http",
-			URL:  url,
-			Headers: map[string]string{
-				"Authorization": "Bearer " + key,
-			},
-		})
+
 		rotated++
 		results = append(results, result{service: svc.Name, source: source})
 	}
@@ -152,11 +178,20 @@ func runRefreshKeys(force bool, serviceFilter string, ifNearExpiry bool) error {
 		return fmt.Errorf("write settings: %w", err)
 	}
 
-	fmt.Println()
-	fmt.Printf("Rotated %d key(s) in %s:\n", rotated, mustSettingsPath())
+	// Codex rewrite pass — patch inline Authorization headers in both
+	// the user-scope codex config and the cwd's project-scope codex
+	// config if either has Cassandra services. Failures are logged but
+	// don't abort the run (Claude rotation already succeeded).
+	codexTouched := rewriteCodexConfigs(freshKeys, logf)
+
+	logf("\n")
+	logf("Rotated %d key(s) in Claude settings (%s).\n", rotated, mustSettingsPath())
+	if len(codexTouched) > 0 {
+		logf("Also rewrote: %s\n", strings.Join(codexTouched, ", "))
+	}
 	for _, r := range results {
 		if r.err == nil {
-			fmt.Printf("  - %-20s [%s]\n", r.service, r.source)
+			logf("  - %-20s [%s]\n", r.service, r.source)
 		}
 	}
 	failed := 0
@@ -170,6 +205,78 @@ func runRefreshKeys(force bool, serviceFilter string, ifNearExpiry bool) error {
 		return fmt.Errorf("%d service(s) failed", failed)
 	}
 	return nil
+}
+
+// codexRegisteredAnywhere returns true if `name` appears in either the
+// user-scope codex config or the cwd's project-scope codex config.
+func codexRegisteredAnywhere(name string) bool {
+	for _, scope := range []string{"user", "project"} {
+		path, err := codexConfigPath(scope)
+		if err != nil {
+			continue
+		}
+		cfg, err := loadCodexConfig(path)
+		if err != nil {
+			continue
+		}
+		servers, _ := cfg["mcp_servers"].(map[string]any)
+		if _, ok := servers[name]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// rewriteCodexConfigs updates inline Authorization headers in each
+// codex config that holds at least one freshly-keyed service. Returns
+// the paths actually modified, for the summary log.
+func rewriteCodexConfigs(freshKeys map[string]string, logf func(string, ...any)) []string {
+	if len(freshKeys) == 0 {
+		return nil
+	}
+	var touched []string
+	for _, scope := range []string{"user", "project"} {
+		path, err := codexConfigPath(scope)
+		if err != nil {
+			continue
+		}
+		cfg, err := loadCodexConfig(path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  warning: load %s: %v\n", path, err)
+			continue
+		}
+		servers, _ := cfg["mcp_servers"].(map[string]any)
+		if len(servers) == 0 {
+			continue
+		}
+		changed := false
+		for svcName, newKey := range freshKeys {
+			entry, ok := servers[svcName].(map[string]any)
+			if !ok {
+				continue
+			}
+			url, _ := entry["url"].(string)
+			if url == "" {
+				continue
+			}
+			upsertCodexHTTPServer(cfg, svcName, codexHTTPServer{
+				URL: url,
+				HTTPHeaders: map[string]string{
+					"Authorization": "Bearer " + newKey,
+				},
+			})
+			changed = true
+		}
+		if !changed {
+			continue
+		}
+		if err := saveCodexConfig(path, cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "  warning: write %s: %v\n", path, err)
+			continue
+		}
+		touched = append(touched, path)
+	}
+	return touched
 }
 
 // existingMCPURL reads the URL of a registered MCP server from settings.

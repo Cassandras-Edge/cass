@@ -43,6 +43,7 @@ func New() *cobra.Command {
 	root.AddCommand(teardownCmd())
 	root.AddCommand(claudeCmd())
 	root.AddCommand(codexCmd())
+	root.AddCommand(configCmd())
 	root.AddCommand(authGroupCmd())
 	root.AddCommand(discordCmd())
 	root.AddCommand(gmailCmd())

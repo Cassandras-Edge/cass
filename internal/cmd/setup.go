@@ -18,6 +18,7 @@ import (
 	"github.com/Cassandras-Edge/cass/internal/claudecfg"
 	"github.com/Cassandras-Edge/cass/internal/portal"
 	"github.com/Cassandras-Edge/cass/internal/registry"
+	"github.com/Cassandras-Edge/cass/internal/shellrc"
 )
 
 // ─── codex server registry (independent of the Claude path) ────────────────
@@ -64,10 +65,11 @@ var scopeChoices = []string{"user", "project", "local"}
 
 func setupCmd() *cobra.Command {
 	opts := setupOptions{
-		client:            "auto",
-		scope:             "project",
-		installPatchedCLI: true,
-		installAutoHook:   true,
+		client:             "auto",
+		scope:              "project",
+		installPatchedCLI:  true,
+		installAutoHook:    true,
+		installShellRebind: true,
 	}
 	var includes []string
 	var nonInteractive bool
@@ -100,6 +102,7 @@ Re-running setup is the canonical way to refresh manifests + rotate keys.`,
 	cmd.Flags().BoolVarP(&nonInteractive, "non-interactive", "y", false, "Don't prompt — use flag values as-is")
 	cmd.Flags().BoolVar(&opts.installPatchedCLI, "patched-cli", true, "Install claude-patched binary (used by routines, stagehand)")
 	cmd.Flags().BoolVar(&opts.installAutoHook, "auto-hook", true, "Install SessionStart hook that auto-rotates near-expiry MCP keys")
+	cmd.Flags().BoolVar(&opts.installShellRebind, "shell-rebind", true, "Add alias claude='cass claude' and codex='cass codex' to ~/.zshrc (managed block)")
 	return cmd
 }
 
@@ -107,14 +110,15 @@ Re-running setup is the canonical way to refresh manifests + rotate keys.`,
 // flags populate it with defaults; the interactive form then mutates it
 // in place when the user is in a TTY and didn't pass --non-interactive.
 type setupOptions struct {
-	client            string
-	scope             string
-	deviceName        string
-	includes          []string // --with values; non-empty skips interactive
-	reauth            bool
-	nonInteractive    bool
-	installPatchedCLI bool
-	installAutoHook   bool
+	client             string
+	scope              string
+	deviceName         string
+	includes           []string // --with values; non-empty skips interactive
+	reauth             bool
+	nonInteractive     bool
+	installPatchedCLI  bool
+	installAutoHook    bool
+	installShellRebind bool
 }
 
 func runSetup(opts setupOptions) error {
@@ -211,6 +215,35 @@ func runSetup(opts setupOptions) error {
 		syncCodex(true, optInCodex, codexScopeFor(opts.scope), codexAllow)
 	}
 
+	// Shell rebind — writes/updates the managed alias block in ~/.zshrc
+	// (and ~/.bashrc if it exists). Skipped when opted out via the form
+	// or `--shell-rebind=false`. Failures are logged but don't fail the
+	// run since the setup itself is otherwise complete.
+	if opts.installShellRebind {
+		fmt.Println()
+		fmt.Println("Updating shell rebind...")
+		touched, err := shellrc.Install()
+		switch {
+		case err != nil:
+			fmt.Fprintf(os.Stderr, "  warning: shell rebind: %v\n", err)
+		case len(touched) > 0:
+			for _, p := range touched {
+				fmt.Printf("  wrote managed block to %s\n", p)
+			}
+			fmt.Println("  open a new shell (or `source ~/.zshrc`) so the aliases take effect.")
+			if rcFile, line := shellrc.FindExistingClaudeFunction(); rcFile != "" {
+				fmt.Fprintf(os.Stderr,
+					"  ⚠ %s:%d defines a claude() function — alias now shadows it.\n",
+					rcFile, line,
+				)
+				fmt.Fprintln(os.Stderr,
+					"    Migrate args/env to ~/.cass/config.toml via `cass config edit --global`.")
+			}
+		default:
+			fmt.Println("  already up to date.")
+		}
+	}
+
 	fmt.Println()
 	if contains(clients, "claude") {
 		fmt.Println("Claude services (default):")
@@ -301,6 +334,14 @@ func runTeardown(client, scope string, assumeYes bool) error {
 	if contains(clients, "codex") {
 		removedCodex = teardownCodex(codexScopeFor(scope))
 	}
+
+	// Strip the managed shell alias block. Quiet on no-op so users who
+	// never installed it don't see a misleading "removed" line.
+	shellTouched, err := shellrc.Remove()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "  warning: shellrc remove: %v\n", err)
+	}
+
 	fmt.Println()
 	if contains(clients, "claude") {
 		fmt.Printf("Claude: removed %d service(s)", len(removedClaude))
@@ -316,106 +357,18 @@ func runTeardown(client, scope string, assumeYes bool) error {
 		}
 		fmt.Println()
 	}
+	if len(shellTouched) > 0 {
+		fmt.Printf("Shell rebind: stripped from %s\n", strings.Join(shellTouched, ", "))
+	}
 	return nil
 }
 
-// ─── claude / codex sub-groups ─────────────────────────────────────────────
-
-func claudeCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "claude",
-		Short: "Claude-specific Cassandra commands",
-	}
-	cmd.AddCommand(claudeSetupCmd())
-	cmd.AddCommand(claudeTeardownCmd())
-	return cmd
-}
-
-func claudeSetupCmd() *cobra.Command {
-	var scope string
-	cmd := &cobra.Command{
-		Use:   "setup",
-		Short: "Set up Cassandra MCP servers + skills in Claude Code settings",
-		RunE: func(_ *cobra.Command, _ []string) error {
-			if err := validateChoice(scope, scopeChoices, "--scope"); err != nil {
-				return err
-			}
-			return runSetup(setupOptions{
-				client: "claude", scope: scope,
-				installPatchedCLI: true, installAutoHook: true,
-			})
-		},
-	}
-	cmd.Flags().StringVar(&scope, "scope", "project", "Settings scope")
-	return cmd
-}
-
-func claudeTeardownCmd() *cobra.Command {
-	var scope string
-	var yes bool
-	cmd := &cobra.Command{
-		Use:   "teardown",
-		Short: "Remove Cassandra entries from Claude Code settings",
-		RunE: func(_ *cobra.Command, _ []string) error {
-			if err := validateChoice(scope, scopeChoices, "--scope"); err != nil {
-				return err
-			}
-			return runTeardown("claude", scope, yes)
-		},
-	}
-	cmd.Flags().StringVar(&scope, "scope", "project", "Settings scope to remove from")
-	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Skip confirmation prompt")
-	return cmd
-}
-
-func codexCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "codex",
-		Short: "Codex-specific Cassandra commands",
-	}
-	cmd.AddCommand(codexSetupCmd())
-	cmd.AddCommand(codexTeardownCmd())
-	return cmd
-}
-
-func codexSetupCmd() *cobra.Command {
-	var includes []string
-	var scope string
-	cmd := &cobra.Command{
-		Use:   "setup",
-		Short: "Set up Codex MCP servers and auth for Cassandra services",
-		RunE: func(_ *cobra.Command, _ []string) error {
-			if err := validateChoice(scope, codexScopeChoices, "--scope"); err != nil {
-				return err
-			}
-			return runSetup(setupOptions{
-				client: "codex", scope: scope, includes: includes,
-				installPatchedCLI: true, installAutoHook: true,
-			})
-		},
-	}
-	cmd.Flags().StringSliceVar(&includes, "with", nil, "Enable an optional server (repeatable, comma-separated, or 'all')")
-	cmd.Flags().StringVar(&scope, "scope", "project", "Codex config scope: project (<cwd>/.codex/config.toml) | user (~/.codex/config.toml)")
-	return cmd
-}
-
-func codexTeardownCmd() *cobra.Command {
-	var yes bool
-	var scope string
-	cmd := &cobra.Command{
-		Use:   "teardown",
-		Short: "Remove Cassandra Codex MCP servers",
-		RunE: func(_ *cobra.Command, _ []string) error {
-			if err := validateChoice(scope, codexScopeChoices, "--scope"); err != nil {
-				return err
-			}
-			return runTeardown("codex", scope, yes)
-		},
-	}
-	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Skip confirmation prompt")
-	cmd.Flags().StringVar(&scope, "scope", "project", "Codex config scope to remove from: project | user")
-	return cmd
-}
+// ─── claude / codex sub-groups removed ─────────────────────────────────────
+//
+// `cass claude` / `cass codex` are now passthrough wrappers (see wrapper.go).
+// The old setup/teardown subcommands moved to:
+//   - `cass setup --client claude` / `cass setup --client codex`
+//   - `cass teardown --client claude` / `cass teardown --client codex`
 
 // ─── shared internals ──────────────────────────────────────────────────────
 
@@ -1021,6 +974,12 @@ func runSetupForm(opts setupOptions) ([]string, setupOptions, error) {
 				Description("SessionStart hook in Claude that runs `cass refresh-keys --if-near-expiry` so MCP keys self-heal.").
 				Value(&opts.installAutoHook),
 		),
+		huh.NewGroup(
+			huh.NewConfirm().
+				Title("Rebind claude/codex to cass?").
+				Description(shellRebindDescription()).
+				Value(&opts.installShellRebind),
+		),
 	)
 
 	if err := componentsForm.Run(); err != nil {
@@ -1063,6 +1022,18 @@ func resolveClientsLenient(client string) ([]string, error) {
 func commandExists(name string) bool {
 	_, err := exec.LookPath(name)
 	return err == nil
+}
+
+// shellRebindDescription builds the help text shown beneath the rebind
+// confirm in the setup form. When the user already has a hand-written
+// `claude()` function in their rc, we flag it so they aren't surprised
+// when the alias shadows their custom logic.
+func shellRebindDescription() string {
+	base := "Adds `alias claude='cass claude'` and `alias codex='cass codex'` to ~/.zshrc (managed block — `cass teardown` removes it cleanly)."
+	if rcFile, line := shellrc.FindExistingClaudeFunction(); rcFile != "" {
+		base += fmt.Sprintf("\n⚠ %s:%d defines a claude() function — the alias will shadow it. Migrate args/env to ~/.cass/config.toml first.", rcFile, line)
+	}
+	return base
 }
 
 // promptServiceSelection shows every service applicable to the active

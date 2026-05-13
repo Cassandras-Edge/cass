@@ -41,7 +41,6 @@ var codexServers = map[string]codexServerSpec{
 	"claudeai-mcp":    {Service: "claudeai-mcp", Subdomain: "claude-ai"},
 	"gemini-mcp":      {Service: "gemini-mcp", Subdomain: "gemini"},
 	"perplexity-mcp":  {Service: "perplexity-mcp", Subdomain: "perplexity"},
-	"gateway":         {Service: "gateway", Subdomain: "gateway", Description: "Umbrella gateway — every MCP service through one endpoint"},
 	"tradingview-mcp": {Service: "tradingview-mcp", Subdomain: "tradingview-mcp"},
 	"routines":        {Service: "routines", Subdomain: "routines-mcp"},
 	"schwab-mcp":      {Service: "schwab-mcp", Subdomain: "schwab"},
@@ -53,7 +52,7 @@ var defaultCodexServers = []string{
 }
 
 var optionalCodexServers = []string{
-	"claudeai-mcp", "gemini-mcp", "perplexity-mcp", "gateway", "routines",
+	"claudeai-mcp", "gemini-mcp", "perplexity-mcp", "routines",
 	"tradingview-mcp", "schwab-mcp",
 }
 
@@ -785,11 +784,12 @@ type serviceCatalogEntry struct {
 	Description string
 	Required    bool // pre-checked, can still be toggled off
 	Installed   bool // already present in current scope's settings/config
+	Authed      bool // per-service MCP key is cached locally (no portal round-trip needed)
 }
 
 // buildServiceCatalog returns every service applicable to the active
 // client(s), with descriptions sourced from registry.Service (preferred)
-// or codexServers (for codex-only entries like gateway). Required defaults
+// or codexServers (for codex-only entries). Required defaults
 // to the union of registry defaults + codex defaults across applicable
 // clients.
 func buildServiceCatalog(clients []string, scope string) []serviceCatalogEntry {
@@ -868,7 +868,11 @@ func buildServiceCatalog(clients []string, scope string) []serviceCatalogEntry {
 	for _, n := range names {
 		r := rows[n]
 		out = append(out, serviceCatalogEntry{
-			Name: n, Description: r.desc, Required: r.required, Installed: r.installed,
+			Name:        n,
+			Description: r.desc,
+			Required:    r.required,
+			Installed:   r.installed,
+			Authed:      auth.GetServiceKey(n) != "",
 		})
 	}
 	return out
@@ -907,7 +911,11 @@ func installedCodexServers(scope string) map[string]bool {
 }
 
 // dim is for the right-hand-side description and the (required) / (installed) tags.
-var dimStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+var (
+	dimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	authedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("36"))  // teal — has a cached key
+	noAuthStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214")) // amber — needs minting
+)
 
 // promptServiceSelection shows every service applicable to the active
 // client(s) in one multi-select with descriptions. Required + already-
@@ -939,7 +947,19 @@ func promptServiceSelection(clients []string, scope string) ([]string, error) {
 		case e.Installed:
 			tag = " (installed)"
 		}
-		label := fmt.Sprintf("%-*s  %s", nameWidth, e.Name, dimStyle.Render(e.Description+tag))
+		// Auth indicator on the right — green dot if cached MCP key
+		// exists for this service, amber dot if a fresh mint is needed.
+		var authMark string
+		if e.Authed {
+			authMark = authedStyle.Render("● authed")
+		} else {
+			authMark = noAuthStyle.Render("○ needs auth")
+		}
+		label := fmt.Sprintf("%-*s  %s   %s",
+			nameWidth, e.Name,
+			dimStyle.Render(e.Description+tag),
+			authMark,
+		)
 		opt := huh.NewOption(label, e.Name)
 		if e.Required || e.Installed {
 			opt = opt.Selected(true)

@@ -1,12 +1,12 @@
 {
-  "version": "0.8.1",
+  "version": "0.8.3",
   "description": "Cassandra platform CLI — auth, keys, cookies, and service management",
   "homepage": "https://github.com/Cassandras-Edge/cass",
   "license": "Proprietary",
   "architecture": {
     "64bit": {
-      "url": "https://github.com/Cassandras-Edge/cass/releases/download/v0.8.1/cass-windows-amd64.exe#/cass.exe",
-      "hash": "bc184039f9ae36a534db7f522e34048516c03588dea2ab046836f19be0b92ab6"
+      "url": "https://github.com/Cassandras-Edge/cass/releases/download/v0.8.3/cass-windows-amd64.exe#/cass.exe",
+      "hash": "c22bd49bddf47f116b5150a6862ce45c75aa624c3aa880b412ab30041d0abf40"
     }
   },
   "bin": "cass.exe",

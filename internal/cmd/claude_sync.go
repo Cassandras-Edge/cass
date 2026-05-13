@@ -23,7 +23,11 @@ import (
 // entry to settings.json, drop SKILL.md, and install any required
 // SessionStart hooks. Then auto-uninstall any legacy
 // `<plugin>@cassandra-plugins` entries.
-func syncClaudeDirect(scope string, optIn []string, force bool, quiet bool) error {
+//
+// If allowList is non-nil the target set IS that list (defaults are not
+// auto-added) — used by the interactive picker so the user can opt out
+// of any service, including required ones. nil = legacy behavior.
+func syncClaudeDirect(scope string, optIn []string, force bool, quiet bool, allowList []string) error {
 	cfgScope := mapClaudeScope(scope)
 
 	settings, err := claudecfg.LoadSettings(cfgScope)
@@ -44,8 +48,16 @@ func syncClaudeDirect(scope string, optIn []string, force bool, quiet bool) erro
 		logf("Pruned %d legacy cassandra-plugins entries from %s settings.\n", migrated, scope)
 	}
 
-	// 2. Resolve target services (defaults + opt-ins).
-	targets := resolveTargetServices(optIn)
+	// 2. Resolve target services.
+	var targets []registry.Service
+	if allowList != nil {
+		targets = resolveTargetServicesAllowList(allowList)
+		// Also: if the user dropped a previously-installed service, prune
+		// its mcpServers entry so the config reflects their selection.
+		pruneClaudeServicesNotIn(settings, allowList)
+	} else {
+		targets = resolveTargetServices(optIn)
+	}
 	if len(targets) == 0 {
 		logf("No Cassandra services selected.\n")
 		return claudecfg.SaveSettings(cfgScope, settings)
@@ -143,6 +155,38 @@ func syncClaudeDirect(scope string, optIn []string, force bool, quiet bool) erro
 			len(skipped), strings.Join(skipped, ", "))
 	}
 	return nil
+}
+
+// resolveTargetServicesAllowList returns the services whose names appear
+// in `allow`, preserving registry order. Used by the interactive picker
+// path where the user's selection IS the full list — no implicit defaults.
+func resolveTargetServicesAllowList(allow []string) []registry.Service {
+	set := map[string]bool{}
+	for _, n := range allow {
+		set[n] = true
+	}
+	out := []registry.Service{}
+	for _, s := range registry.Services {
+		if set[s.Name] {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// pruneClaudeServicesNotIn removes mcpServers entries for any Cassandra-
+// known service NOT in `allow`. Other (non-Cassandra) entries are left
+// alone — we only manage what's in our registry.
+func pruneClaudeServicesNotIn(settings map[string]any, allow []string) {
+	allowed := map[string]bool{}
+	for _, n := range allow {
+		allowed[n] = true
+	}
+	for _, s := range registry.Services {
+		if !allowed[s.Name] {
+			claudecfg.RemoveMCPServer(settings, s.Name)
+		}
+	}
 }
 
 // resolveTargetServices returns the services to install. Always includes

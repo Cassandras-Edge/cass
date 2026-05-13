@@ -36,7 +36,7 @@ const (
 	gmailTokenEndpoint  = "https://oauth2.googleapis.com/token"
 	gmailRevokeEndpoint = "https://oauth2.googleapis.com/revoke"
 	gmailScope          = "https://www.googleapis.com/auth/gmail.readonly"
-	gmailAuthService    = "gmail"
+	gmailAuthService    = "gmail-mcp"
 )
 
 func gmailCmd() *cobra.Command {

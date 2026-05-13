@@ -20,10 +20,17 @@ type Service struct {
 
 // Services is the full catalog. Order is what's shown to the user in
 // listings. Optional services don't get installed by default.
+//
+// IMPORTANT: Name must exactly match the FastMCP server's SERVICE_ID and
+// the portal's MCP_SERVICES.id. /keys/validate does an exact-match lookup.
+// Two historical mismatches: cassandra-media-mcp's SERVICE_ID is
+// "yt-mcp" (legacy from when it was just transcription), and
+// cassandra-routines exposes "routines" (the trailing -mcp is in the
+// subdomain only).
 var Services = []Service{
 	// ── Default (installed unconditionally) ──
 	{Name: "gmail-mcp", Repo: "Cassandras-Edge/cassandra-gmail-mcp"},
-	{Name: "media-mcp", Repo: "Cassandras-Edge/cassandra-media-mcp"},
+	{Name: "yt-mcp", Repo: "Cassandras-Edge/cassandra-media-mcp"},
 	{Name: "twitter-mcp", Repo: "Cassandras-Edge/cassandra-twitter-mcp"},
 	{Name: "reddit-mcp", Repo: "Cassandras-Edge/cassandra-reddit-mcp"},
 	{Name: "discord-mcp", Repo: "Cassandras-Edge/cassandra-discord-mcp"},
@@ -35,7 +42,7 @@ var Services = []Service{
 	{Name: "perplexity-mcp", Repo: "Cassandras-Edge/cassandra-perplexity-mcp", Optional: true},
 	{Name: "tradingview-mcp", Repo: "Cassandras-Edge/cassandra-tradingview-mcp", Optional: true},
 	{Name: "schwab-mcp", Repo: "Cassandras-Edge/cassandra-schwab-mcp", Optional: true},
-	{Name: "routines-mcp", Repo: "Cassandras-Edge/cassandra-routines", Optional: true},
+	{Name: "routines", Repo: "Cassandras-Edge/cassandra-routines", Optional: true},
 }
 
 // Find returns the Service with the given name, or nil.

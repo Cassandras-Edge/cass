@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/huh"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
 
 	"github.com/Cassandras-Edge/cass/internal/auth"
@@ -26,24 +27,25 @@ import (
 // side now follows too via internal/manifest + internal/claudecfg.
 
 type codexServerSpec struct {
-	Service   string
-	Subdomain string
+	Service     string
+	Subdomain   string
+	Description string // shown only for codex-only services (others reuse registry.Service.Description)
 }
 
 var codexServers = map[string]codexServerSpec{
-	"yt-mcp":          {"yt-mcp", "youtube"},
-	"discord-mcp":     {"discord-mcp", "discord-mcp"},
-	"twitter-mcp":     {"twitter-mcp", "twitter-mcp"},
-	"market-research": {"market-research", "market-research"},
-	"reddit-mcp":      {"reddit-mcp", "reddit"},
-	"claudeai-mcp":    {"claudeai-mcp", "claude-ai"},
-	"gemini-mcp":      {"gemini-mcp", "gemini"},
-	"perplexity-mcp":  {"perplexity-mcp", "perplexity"},
-	"gateway":         {"gateway", "gateway"},
-	"tradingview-mcp": {"tradingview-mcp", "tradingview-mcp"},
-	"routines":        {"routines", "routines-mcp"},
-	"schwab-mcp":      {"schwab-mcp", "schwab"},
-	"gmail-mcp":       {"gmail-mcp", "gmail-mcp"},
+	"yt-mcp":          {Service: "yt-mcp", Subdomain: "youtube"},
+	"discord-mcp":     {Service: "discord-mcp", Subdomain: "discord-mcp"},
+	"twitter-mcp":     {Service: "twitter-mcp", Subdomain: "twitter-mcp"},
+	"market-research": {Service: "market-research", Subdomain: "market-research"},
+	"reddit-mcp":      {Service: "reddit-mcp", Subdomain: "reddit"},
+	"claudeai-mcp":    {Service: "claudeai-mcp", Subdomain: "claude-ai"},
+	"gemini-mcp":      {Service: "gemini-mcp", Subdomain: "gemini"},
+	"perplexity-mcp":  {Service: "perplexity-mcp", Subdomain: "perplexity"},
+	"gateway":         {Service: "gateway", Subdomain: "gateway", Description: "Umbrella gateway — every MCP service through one endpoint"},
+	"tradingview-mcp": {Service: "tradingview-mcp", Subdomain: "tradingview-mcp"},
+	"routines":        {Service: "routines", Subdomain: "routines-mcp"},
+	"schwab-mcp":      {Service: "schwab-mcp", Subdomain: "schwab"},
+	"gmail-mcp":       {Service: "gmail-mcp", Subdomain: "gmail-mcp"},
 }
 
 var defaultCodexServers = []string{
@@ -117,27 +119,51 @@ func runSetup(client, scope string, includes []string, deviceName string, reauth
 		claudePluginUninstall(false)
 	}
 
-	// If the user didn't pre-pick optionals via --with and we're in a TTY,
-	// show a checklist. Required services always install regardless.
+	// Interactive picker — when the user didn't pre-pick optionals via
+	// --with and we're in a TTY. The picker returns the full allow-list
+	// of services the user wants installed (defaults pre-checked but
+	// uncheckable), which means we bypass the "always install defaults"
+	// logic on this code path and honor the user's exact selection.
 	allOptional := union(optionalCodexServers, registryOptionalNames())
+	var allowList []string
+	useAllowList := false
 	if len(includes) == 0 && !nonInteractive && isInteractive() {
-		already := alreadyInstalledOptionals(clients, scope, allOptional)
-		picked, err := promptOptionalServices(clients, allOptional, already)
+		picked, err := promptServiceSelection(clients, scope)
 		if err != nil {
 			return err
 		}
-		includes = picked
+		allowList = picked
+		useAllowList = true
 	}
 
-	optInClaude := resolveOptIns(includes, registryOptionalNames(), allOptional)
-	optInCodex := resolveOptIns(includes, optionalCodexServers, allOptional)
+	// Build per-client opt-in lists. In allow-list mode optInClaude/Codex
+	// are the slices of OPTIONAL services the user picked; required ones
+	// are passed via the allow-list mode flag so sync* can honor opt-outs.
+	var optInClaude, optInCodex []string
+	if useAllowList {
+		for _, name := range allowList {
+			if contains(registryOptionalNames(), name) {
+				optInClaude = append(optInClaude, name)
+			}
+			if contains(optionalCodexServers, name) {
+				optInCodex = append(optInCodex, name)
+			}
+		}
+	} else {
+		optInClaude = resolveOptIns(includes, registryOptionalNames(), allOptional)
+		optInCodex = resolveOptIns(includes, optionalCodexServers, allOptional)
+	}
 
 	if contains(clients, "claude") {
 		fmt.Println()
 		// cass setup is an explicit user action — always fetch fresh
 		// manifests, ignoring the per-service 1h cache. The cache is
 		// for hook-driven invocations like cass refresh-keys.
-		if err := syncClaudeDirect(scope, optInClaude, true, false); err != nil {
+		claudeAllow := allowList
+		if !useAllowList {
+			claudeAllow = nil
+		}
+		if err := syncClaudeDirect(scope, optInClaude, true, false, claudeAllow); err != nil {
 			return err
 		}
 		if contains(clients, "codex") {
@@ -151,7 +177,11 @@ func runSetup(client, scope string, includes []string, deviceName string, reauth
 		if err := installPatchedPrebuilt(""); err != nil {
 			fmt.Fprintf(os.Stderr, "  warning: patched-cli install: %v\n", err)
 		}
-		syncCodex(true, optInCodex, codexScopeFor(scope))
+		codexAllow := allowList
+		if !useAllowList {
+			codexAllow = nil
+		}
+		syncCodex(true, optInCodex, codexScopeFor(scope), codexAllow)
 	}
 
 	fmt.Println()
@@ -499,7 +529,11 @@ func codexScopeFor(scope string) string {
 // and writes them inline as `http_headers.Authorization = "Bearer <key>"`
 // in either ~/.codex/config.toml (scope=user) or <cwd>/.codex/config.toml
 // (scope=project). Codex picks them up at startup with no env sourcing.
-func syncCodex(installMissing bool, optIn []string, scope string) {
+//
+// allowList non-nil = the explicit set the user picked in the interactive
+// picker; defaults are not auto-added and any installed-but-unpicked
+// services get removed. nil = legacy defaults + opt-ins behavior.
+func syncCodex(installMissing bool, optIn []string, scope string, allowList []string) {
 	fmt.Printf("Syncing Codex MCP servers (scope: %s)...\n", scope)
 
 	cfgPath, err := codexConfigPath(scope)
@@ -520,6 +554,23 @@ func syncCodex(installMissing bool, optIn []string, scope string) {
 	}
 	projectID, _ := defaultProjectID(client)
 
+	// Allow-list mode: drop any Cassandra-known codex servers the user
+	// unchecked. Non-Cassandra mcp_servers entries are untouched.
+	if allowList != nil {
+		allowSet := map[string]bool{}
+		for _, n := range allowList {
+			allowSet[n] = true
+		}
+		for name := range codexServers {
+			if !allowSet[name] {
+				if removeCodexServer(cfg, name) {
+					_ = auth.ClearServiceKey(codexServers[name].Service)
+					fmt.Printf("Removed %s (deselected)...\n", name)
+				}
+			}
+		}
+	}
+
 	existingServers, _ := cfg["mcp_servers"].(map[string]any)
 
 	var touched, skipped []string
@@ -531,13 +582,27 @@ func syncCodex(installMissing bool, optIn []string, scope string) {
 	for _, name := range names {
 		meta := codexServers[name]
 		_, exists := existingServers[name]
-		isOptional := contains(optionalCodexServers, name)
-		if !exists && isOptional && !contains(optIn, name) {
-			skipped = append(skipped, name)
-			continue
-		}
-		if !exists && !installMissing {
-			continue
+		var shouldInstall bool
+		if allowList != nil {
+			// Allow-list mode: install if and only if it's in allowList.
+			for _, n := range allowList {
+				if n == name {
+					shouldInstall = true
+					break
+				}
+			}
+			if !shouldInstall {
+				continue
+			}
+		} else {
+			isOptional := contains(optionalCodexServers, name)
+			if !exists && isOptional && !contains(optIn, name) {
+				skipped = append(skipped, name)
+				continue
+			}
+			if !exists && !installMissing {
+				continue
+			}
 		}
 
 		key := auth.GetServiceKey(meta.Service)
@@ -713,52 +778,182 @@ func isInteractive() bool {
 	return (si.Mode()&os.ModeCharDevice) != 0 && (so.Mode()&os.ModeCharDevice) != 0
 }
 
-// promptOptionalServices shows a multi-select for the optional services
-// relevant to the active client(s). `preChecked` items start selected so a
-// repeat `cass setup` feels idempotent — the user sees their previous
-// choices and can adjust. Aborting via ctrl-c returns an error so we don't
-// silently proceed with an unintended config.
-func promptOptionalServices(clients, allOptional, preChecked []string) ([]string, error) {
-	// Filter optionals to those that apply to the active client set. If
-	// only codex is active, hide Claude-only optionals (and vice versa).
-	var pool []string
-	for _, name := range allOptional {
-		inClaude := contains(registryOptionalNames(), name)
-		inCodex := contains(optionalCodexServers, name)
-		if contains(clients, "claude") && inClaude {
-			pool = append(pool, name)
-			continue
+// serviceCatalogEntry is one row in the unified setup picker. It's the
+// union of registry.Service (Claude side) and codexServers (Codex side).
+type serviceCatalogEntry struct {
+	Name        string
+	Description string
+	Required    bool // pre-checked, can still be toggled off
+	Installed   bool // already present in current scope's settings/config
+}
+
+// buildServiceCatalog returns every service applicable to the active
+// client(s), with descriptions sourced from registry.Service (preferred)
+// or codexServers (for codex-only entries like gateway). Required defaults
+// to the union of registry defaults + codex defaults across applicable
+// clients.
+func buildServiceCatalog(clients []string, scope string) []serviceCatalogEntry {
+	type row struct {
+		desc      string
+		required  bool
+		installed bool
+	}
+	rows := map[string]*row{}
+
+	getOrCreate := func(name string) *row {
+		r, ok := rows[name]
+		if !ok {
+			r = &row{}
+			rows[name] = r
 		}
-		if contains(clients, "codex") && inCodex {
-			pool = append(pool, name)
+		return r
+	}
+
+	if contains(clients, "claude") {
+		installed := installedClaudeServices(scope)
+		for _, s := range registry.Services {
+			r := getOrCreate(s.Name)
+			if r.desc == "" {
+				r.desc = s.Description
+			}
+			if !s.Optional {
+				r.required = true
+			}
+			if installed[s.Name] {
+				r.installed = true
+			}
 		}
 	}
-	sort.Strings(pool)
-	if len(pool) == 0 {
+	if contains(clients, "codex") {
+		installed := installedCodexServers(scope)
+		// Required = codex default set when codex is active.
+		requiredSet := map[string]bool{}
+		for _, n := range defaultCodexServers {
+			requiredSet[n] = true
+		}
+		for name, spec := range codexServers {
+			r := getOrCreate(name)
+			if r.desc == "" {
+				r.desc = spec.Description
+			}
+			if r.desc == "" {
+				if rs := registry.Find(name); rs != nil {
+					r.desc = rs.Description
+				}
+			}
+			if requiredSet[name] {
+				r.required = true
+			}
+			if installed[name] {
+				r.installed = true
+			}
+		}
+	}
+
+	names := make([]string, 0, len(rows))
+	for n := range rows {
+		names = append(names, n)
+	}
+	// Sort: required first (alpha within group), then optional (alpha) — so
+	// the user sees what'll install by default at the top.
+	sort.Slice(names, func(i, j int) bool {
+		ri, rj := rows[names[i]].required, rows[names[j]].required
+		if ri != rj {
+			return ri // true sorts first
+		}
+		return names[i] < names[j]
+	})
+
+	out := make([]serviceCatalogEntry, 0, len(names))
+	for _, n := range names {
+		r := rows[n]
+		out = append(out, serviceCatalogEntry{
+			Name: n, Description: r.desc, Required: r.required, Installed: r.installed,
+		})
+	}
+	return out
+}
+
+func installedClaudeServices(scope string) map[string]bool {
+	out := map[string]bool{}
+	settings, err := claudecfg.LoadSettings(claudecfg.Scope(scope))
+	if err != nil {
+		return out
+	}
+	if servers, ok := settings["mcpServers"].(map[string]any); ok {
+		for name := range servers {
+			out[name] = true
+		}
+	}
+	return out
+}
+
+func installedCodexServers(scope string) map[string]bool {
+	out := map[string]bool{}
+	path, err := codexConfigPath(codexScopeFor(scope))
+	if err != nil {
+		return out
+	}
+	cfg, err := loadCodexConfig(path)
+	if err != nil {
+		return out
+	}
+	if servers, ok := cfg["mcp_servers"].(map[string]any); ok {
+		for name := range servers {
+			out[name] = true
+		}
+	}
+	return out
+}
+
+// dim is for the right-hand-side description and the (required) / (installed) tags.
+var dimStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+
+// promptServiceSelection shows every service applicable to the active
+// client(s) in one multi-select with descriptions. Required + already-
+// installed services start checked; the user can toggle anything off to
+// opt out. Returns the explicit set of service names to install.
+//
+// Aborting via ctrl-c returns an error so we don't silently proceed.
+func promptServiceSelection(clients []string, scope string) ([]string, error) {
+	catalog := buildServiceCatalog(clients, scope)
+	if len(catalog) == 0 {
 		return nil, nil
 	}
 
-	opts := make([]huh.Option[string], 0, len(pool))
-	for _, name := range pool {
-		opt := huh.NewOption(name, name)
-		if contains(preChecked, name) {
+	// Pad the name column so descriptions line up.
+	nameWidth := 0
+	for _, e := range catalog {
+		if len(e.Name) > nameWidth {
+			nameWidth = len(e.Name)
+		}
+	}
+
+	opts := make([]huh.Option[string], 0, len(catalog))
+	selected := make([]string, 0, len(catalog))
+	for _, e := range catalog {
+		tag := ""
+		switch {
+		case e.Required:
+			tag = " (required)"
+		case e.Installed:
+			tag = " (installed)"
+		}
+		label := fmt.Sprintf("%-*s  %s", nameWidth, e.Name, dimStyle.Render(e.Description+tag))
+		opt := huh.NewOption(label, e.Name)
+		if e.Required || e.Installed {
 			opt = opt.Selected(true)
+			selected = append(selected, e.Name)
 		}
 		opts = append(opts, opt)
 	}
 
-	selected := make([]string, 0, len(preChecked))
-	for _, name := range preChecked {
-		if contains(pool, name) {
-			selected = append(selected, name)
-		}
-	}
 	form := huh.NewMultiSelect[string]().
-		Title("Optional services").
-		Description("Required services install automatically — pick any extras (space to toggle, enter to confirm).").
+		Title("Cassandra services").
+		Description("Space to toggle, enter to confirm. Required ones start checked; uncheck to opt out.").
 		Options(opts...).
 		Value(&selected).
-		Height(len(pool) + 4)
+		Height(len(catalog) + 4)
 
 	if err := form.Run(); err != nil {
 		if errors.Is(err, huh.ErrUserAborted) {
@@ -767,40 +962,4 @@ func promptOptionalServices(clients, allOptional, preChecked []string) ([]string
 		return nil, err
 	}
 	return selected, nil
-}
-
-// alreadyInstalledOptionals returns the names of optional services that
-// already have entries in the active scope's settings (Claude) or config
-// (Codex). Used to pre-check the interactive picker.
-func alreadyInstalledOptionals(clients []string, scope string, allOptional []string) []string {
-	installed := map[string]bool{}
-
-	if contains(clients, "claude") {
-		if settings, err := claudecfg.LoadSettings(claudecfg.Scope(scope)); err == nil {
-			if servers, ok := settings["mcpServers"].(map[string]any); ok {
-				for name := range servers {
-					installed[name] = true
-				}
-			}
-		}
-	}
-	if contains(clients, "codex") {
-		if path, err := codexConfigPath(codexScopeFor(scope)); err == nil {
-			if cfg, err := loadCodexConfig(path); err == nil {
-				if servers, ok := cfg["mcp_servers"].(map[string]any); ok {
-					for name := range servers {
-						installed[name] = true
-					}
-				}
-			}
-		}
-	}
-
-	out := make([]string, 0, len(installed))
-	for _, name := range allOptional {
-		if installed[name] {
-			out = append(out, name)
-		}
-	}
-	return out
 }

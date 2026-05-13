@@ -13,9 +13,10 @@ package registry
 
 // Service is a Cassandra-managed unit cass knows how to install.
 type Service struct {
-	Name     string // canonical service ID (matches manifest.name + SERVICE_ID in the MCP)
-	Repo     string // GitHub repo path, e.g. "Cassandras-Edge/cassandra-gmail-mcp"
-	Optional bool   // true = skipped unless explicitly opted in via --with
+	Name        string // canonical service ID (matches manifest.name + SERVICE_ID in the MCP)
+	Repo        string // GitHub repo path, e.g. "Cassandras-Edge/cassandra-gmail-mcp"
+	Optional    bool   // true = skipped unless explicitly opted in via --with
+	Description string // one-line, shown in the interactive setup picker
 }
 
 // Services is the full catalog. Order is what's shown to the user in
@@ -29,20 +30,20 @@ type Service struct {
 // subdomain only).
 var Services = []Service{
 	// ── Default (installed unconditionally) ──
-	{Name: "gmail-mcp", Repo: "Cassandras-Edge/cassandra-gmail-mcp"},
-	{Name: "yt-mcp", Repo: "Cassandras-Edge/cassandra-media-mcp"},
-	{Name: "twitter-mcp", Repo: "Cassandras-Edge/twitter-mcp"},
-	{Name: "reddit-mcp", Repo: "Cassandras-Edge/reddit-mcp"},
-	{Name: "discord-mcp", Repo: "Cassandras-Edge/cassandra-discord-mcp"},
-	{Name: "market-research", Repo: "Cassandras-Edge/cassandra-market-research"},
+	{Name: "gmail-mcp", Repo: "Cassandras-Edge/cassandra-gmail-mcp", Description: "Gmail — read inbox, threads, attachments"},
+	{Name: "yt-mcp", Repo: "Cassandras-Edge/cassandra-media-mcp", Description: "YouTube — transcribe + search videos (GPU-backed)"},
+	{Name: "twitter-mcp", Repo: "Cassandras-Edge/twitter-mcp", Description: "Twitter/X — search, threads, your feed (cookie auth)"},
+	{Name: "reddit-mcp", Repo: "Cassandras-Edge/reddit-mcp", Description: "Reddit — public posts + comment threads"},
+	{Name: "discord-mcp", Repo: "Cassandras-Edge/cassandra-discord-mcp", Description: "Discord — read your servers and DMs (via Matrix bridge)"},
+	{Name: "market-research", Repo: "Cassandras-Edge/cassandra-market-research", Description: "Market data — stocks, SEC filings, options, crypto"},
 
 	// ── Opt-in (--with <name> or --with all) ──
-	{Name: "claudeai-mcp", Repo: "Cassandras-Edge/cassandra-claudeai-mcp", Optional: true},
-	{Name: "gemini-mcp", Repo: "Cassandras-Edge/cassandra-gemini-mcp", Optional: true},
-	{Name: "perplexity-mcp", Repo: "Cassandras-Edge/cassandra-perplexity-mcp", Optional: true},
-	{Name: "tradingview-mcp", Repo: "Cassandras-Edge/cassandra-tradingview-mcp", Optional: true},
-	{Name: "schwab-mcp", Repo: "Cassandras-Edge/cassandra-schwab-mcp", Optional: true},
-	{Name: "routines", Repo: "Cassandras-Edge/cassandra-routines", Optional: true},
+	{Name: "claudeai-mcp", Repo: "Cassandras-Edge/cassandra-claudeai-mcp", Optional: true, Description: "claude.ai — your conversations, projects, knowledge docs"},
+	{Name: "gemini-mcp", Repo: "Cassandras-Edge/cassandra-gemini-mcp", Optional: true, Description: "Gemini — grounded web search + reasoning"},
+	{Name: "perplexity-mcp", Repo: "Cassandras-Edge/cassandra-perplexity-mcp", Optional: true, Description: "Perplexity — Sonar search + finance scrape"},
+	{Name: "tradingview-mcp", Repo: "Cassandras-Edge/cassandra-tradingview-mcp", Optional: true, Description: "TradingView — symbols, news, watchlists, OHLC"},
+	{Name: "schwab-mcp", Repo: "Cassandras-Edge/cassandra-schwab-mcp", Optional: true, Description: "Charles Schwab — account positions + orders (read)"},
+	{Name: "routines", Repo: "Cassandras-Edge/cassandra-routines", Optional: true, Description: "Routines — manage your scheduled Claude jobs"},
 }
 
 // Find returns the Service with the given name, or nil.

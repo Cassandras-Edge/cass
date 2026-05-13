@@ -63,9 +63,14 @@ var codexScopeChoices = []string{"user", "project"}
 var scopeChoices = []string{"user", "project", "local"}
 
 func setupCmd() *cobra.Command {
-	var client, scope, deviceName string
+	opts := setupOptions{
+		client:            "auto",
+		scope:             "user",
+		installPatchedCLI: true,
+		installAutoHook:   true,
+	}
 	var includes []string
-	var reauth, nonInteractive bool
+	var nonInteractive bool
 	cmd := &cobra.Command{
 		Use:   "setup",
 		Short: "First-time Cassandra setup for Claude Code, Codex, or both",
@@ -76,32 +81,65 @@ per-service MCP keys, and installs a SessionStart auto-update hook.
 
 Re-running setup is the canonical way to refresh manifests + rotate keys.`,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if err := validateChoice(client, []string{"auto", "claude", "codex", "both"}, "--client"); err != nil {
+			if err := validateChoice(opts.client, []string{"auto", "claude", "codex", "both"}, "--client"); err != nil {
 				return err
 			}
-			if err := validateChoice(scope, scopeChoices, "--scope"); err != nil {
+			if err := validateChoice(opts.scope, scopeChoices, "--scope"); err != nil {
 				return err
 			}
-			return runSetup(client, scope, includes, deviceName, reauth, nonInteractive)
+			opts.includes = includes
+			opts.nonInteractive = nonInteractive
+			return runSetup(opts)
 		},
 	}
-	cmd.Flags().StringVar(&client, "client", "auto", "Which client to set up: auto | claude | codex | both")
-	cmd.Flags().StringVar(&scope, "scope", "user", "Claude settings scope: user | project | local")
+	cmd.Flags().StringVar(&opts.client, "client", "auto", "Which client to set up: auto | claude | codex | both")
+	cmd.Flags().StringVar(&opts.scope, "scope", "user", "Claude settings scope: user | project | local")
 	cmd.Flags().StringSliceVar(&includes, "with", nil, "Enable an optional service (repeatable, comma-separated, or 'all'). Skips the interactive picker.")
-	cmd.Flags().StringVar(&deviceName, "device", "", "Device name to register (default: prompt with hostname)")
-	cmd.Flags().BoolVar(&reauth, "reauth", false, "Force a fresh device login even if creds look valid")
-	cmd.Flags().BoolVarP(&nonInteractive, "non-interactive", "y", false, "Don't prompt — install only required services + whatever --with names")
+	cmd.Flags().StringVar(&opts.deviceName, "device", "", "Device name to register (default: prompt with hostname)")
+	cmd.Flags().BoolVar(&opts.reauth, "reauth", false, "Force a fresh device login even if creds look valid")
+	cmd.Flags().BoolVarP(&nonInteractive, "non-interactive", "y", false, "Don't prompt — use flag values as-is")
+	cmd.Flags().BoolVar(&opts.installPatchedCLI, "patched-cli", true, "Install claude-patched binary (used by routines, stagehand)")
+	cmd.Flags().BoolVar(&opts.installAutoHook, "auto-hook", true, "Install SessionStart hook that auto-rotates near-expiry MCP keys")
 	return cmd
 }
 
-func runSetup(client, scope string, includes []string, deviceName string, reauth, nonInteractive bool) error {
-	clients, err := resolveClients(client)
-	if err != nil {
+// setupOptions captures every selectable knob in `cass setup`. Cobra
+// flags populate it with defaults; the interactive form then mutates it
+// in place when the user is in a TTY and didn't pass --non-interactive.
+type setupOptions struct {
+	client            string
+	scope             string
+	deviceName        string
+	includes          []string // --with values; non-empty skips interactive
+	reauth            bool
+	nonInteractive    bool
+	installPatchedCLI bool
+	installAutoHook   bool
+}
+
+func runSetup(opts setupOptions) error {
+	fmt.Println("Checking device authorization...")
+	if err := ensureDeviceAuthorized(opts.deviceName, opts.reauth); err != nil {
 		return err
 	}
 
-	fmt.Println("Checking device authorization...")
-	if err := ensureDeviceAuthorized(deviceName, reauth); err != nil {
+	// Interactive form — covers client, scope, patched-cli, hook, and
+	// the service catalog. Skipped if --with names something explicitly,
+	// --non-interactive is set, or we're not on a TTY (pipes, CI, etc).
+	useAllowList := false
+	var allowList []string
+	if len(opts.includes) == 0 && !opts.nonInteractive && isInteractive() {
+		picked, newOpts, err := runSetupForm(opts)
+		if err != nil {
+			return err
+		}
+		opts = newOpts
+		allowList = picked
+		useAllowList = true
+	}
+
+	clients, err := resolveClients(opts.client)
+	if err != nil {
 		return err
 	}
 
@@ -118,26 +156,20 @@ func runSetup(client, scope string, includes []string, deviceName string, reauth
 		claudePluginUninstall(false)
 	}
 
-	// Interactive picker — when the user didn't pre-pick optionals via
-	// --with and we're in a TTY. The picker returns the full allow-list
-	// of services the user wants installed (defaults pre-checked but
-	// uncheckable), which means we bypass the "always install defaults"
-	// logic on this code path and honor the user's exact selection.
-	allOptional := union(optionalCodexServers, registryOptionalNames())
-	var allowList []string
-	useAllowList := false
-	if len(includes) == 0 && !nonInteractive && isInteractive() {
-		picked, err := promptServiceSelection(clients, scope)
-		if err != nil {
-			return err
+	// Patched Claude CLI install — used by routines/stagehand. Run once,
+	// before either sync path, so claude + codex flows both see it.
+	if opts.installPatchedCLI {
+		fmt.Println()
+		fmt.Println("Updating patched Claude CLI...")
+		if err := installPatchedPrebuilt(""); err != nil {
+			fmt.Fprintf(os.Stderr, "  warning: patched-cli install: %v\n", err)
 		}
-		allowList = picked
-		useAllowList = true
 	}
 
 	// Build per-client opt-in lists. In allow-list mode optInClaude/Codex
 	// are the slices of OPTIONAL services the user picked; required ones
 	// are passed via the allow-list mode flag so sync* can honor opt-outs.
+	allOptional := union(optionalCodexServers, registryOptionalNames())
 	var optInClaude, optInCodex []string
 	if useAllowList {
 		for _, name := range allowList {
@@ -149,8 +181,8 @@ func runSetup(client, scope string, includes []string, deviceName string, reauth
 			}
 		}
 	} else {
-		optInClaude = resolveOptIns(includes, registryOptionalNames(), allOptional)
-		optInCodex = resolveOptIns(includes, optionalCodexServers, allOptional)
+		optInClaude = resolveOptIns(opts.includes, registryOptionalNames(), allOptional)
+		optInCodex = resolveOptIns(opts.includes, optionalCodexServers, allOptional)
 	}
 
 	if contains(clients, "claude") {
@@ -162,7 +194,7 @@ func runSetup(client, scope string, includes []string, deviceName string, reauth
 		if !useAllowList {
 			claudeAllow = nil
 		}
-		if err := syncClaudeDirect(scope, optInClaude, true, false, claudeAllow); err != nil {
+		if err := syncClaudeDirect(opts.scope, optInClaude, true, false, claudeAllow, opts.installAutoHook); err != nil {
 			return err
 		}
 		if contains(clients, "codex") {
@@ -172,15 +204,11 @@ func runSetup(client, scope string, includes []string, deviceName string, reauth
 
 	if contains(clients, "codex") {
 		fmt.Println()
-		fmt.Println("Updating patched Claude CLI...")
-		if err := installPatchedPrebuilt(""); err != nil {
-			fmt.Fprintf(os.Stderr, "  warning: patched-cli install: %v\n", err)
-		}
 		codexAllow := allowList
 		if !useAllowList {
 			codexAllow = nil
 		}
-		syncCodex(true, optInCodex, codexScopeFor(scope), codexAllow)
+		syncCodex(true, optInCodex, codexScopeFor(opts.scope), codexAllow)
 	}
 
 	fmt.Println()
@@ -312,7 +340,10 @@ func claudeSetupCmd() *cobra.Command {
 			if err := validateChoice(scope, scopeChoices, "--scope"); err != nil {
 				return err
 			}
-			return runSetup("claude", scope, nil, "", false, false)
+			return runSetup(setupOptions{
+				client: "claude", scope: scope,
+				installPatchedCLI: true, installAutoHook: true,
+			})
 		},
 	}
 	cmd.Flags().StringVar(&scope, "scope", "user", "Settings scope")
@@ -357,7 +388,10 @@ func codexSetupCmd() *cobra.Command {
 			if err := validateChoice(scope, codexScopeChoices, "--scope"); err != nil {
 				return err
 			}
-			return runSetup("codex", scope, includes, "", false, false)
+			return runSetup(setupOptions{
+				client: "codex", scope: scope, includes: includes,
+				installPatchedCLI: true, installAutoHook: true,
+			})
 		},
 	}
 	cmd.Flags().StringSliceVar(&includes, "with", nil, "Enable an optional server (repeatable, comma-separated, or 'all')")
@@ -916,6 +950,116 @@ var (
 	authedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("36"))  // teal — has a cached key
 	noAuthStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214")) // amber — needs minting
 )
+
+// runSetupForm is the full-suite interactive setup. Two huh.Form passes:
+//
+//  1. Components: which client(s) to configure, which scope, whether to
+//     install the patched Claude CLI, and whether to wire the auto-update
+//     SessionStart hook. Flag values pre-fill all four fields.
+//
+//  2. Services: the per-service multi-select picker (existing logic).
+//     Built AFTER the components pass so its catalog reflects the
+//     user's just-picked client + scope.
+//
+// Returns the selected services + the (possibly mutated) options. Ctrl-c
+// at either pass returns an error so we don't silently proceed.
+func runSetupForm(opts setupOptions) ([]string, setupOptions, error) {
+	// Pass 1 — components.
+	// Resolve --client auto to the concrete value the user sees in the
+	// form (Both / Claude / Codex) so they're not staring at "auto".
+	clientChoice := opts.client
+	if clientChoice == "auto" {
+		// best-effort detection without erroring (resolveClients errors
+		// when neither CLI is present; here we want a defaulted pick).
+		hasClaude := commandExists("claude")
+		hasCodex := commandExists("codex")
+		switch {
+		case hasClaude && hasCodex:
+			clientChoice = "both"
+		case hasClaude:
+			clientChoice = "claude"
+		case hasCodex:
+			clientChoice = "codex"
+		default:
+			clientChoice = "both"
+		}
+	}
+
+	componentsForm := huh.NewForm(
+		huh.NewGroup(
+			huh.NewSelect[string]().
+				Title("Client(s) to configure").
+				Description("Which AI assistant(s) should cass write configs for?").
+				Options(
+					huh.NewOption("Both — Claude Code + Codex", "both"),
+					huh.NewOption("Claude Code only", "claude"),
+					huh.NewOption("Codex only", "codex"),
+				).
+				Value(&clientChoice),
+
+			huh.NewSelect[string]().
+				Title("Settings scope").
+				Description("Where to write the mcpServers entries.").
+				Options(
+					huh.NewOption("User — global (~/.claude, ~/.codex)", "user"),
+					huh.NewOption("Project — only this directory (<cwd>/.claude, <cwd>/.codex)", "project"),
+					huh.NewOption("Local — like project, but settings.local.json (Claude only)", "local"),
+				).
+				Value(&opts.scope),
+
+			huh.NewConfirm().
+				Title("Install patched Claude CLI?").
+				Description("~/.local/bin/claude-patched — used by routines and stagehand. Safe to enable; doesn't replace `claude`.").
+				Value(&opts.installPatchedCLI),
+
+			huh.NewConfirm().
+				Title("Install auto-rotate hook?").
+				Description("SessionStart hook in Claude that runs `cass refresh-keys --if-near-expiry` so MCP keys self-heal.").
+				Value(&opts.installAutoHook),
+		).Title("Setup options"),
+	)
+
+	if err := componentsForm.Run(); err != nil {
+		if errors.Is(err, huh.ErrUserAborted) {
+			return nil, opts, fmt.Errorf("setup aborted")
+		}
+		return nil, opts, err
+	}
+	opts.client = clientChoice
+
+	// Pass 2 — services picker. Build catalog based on the just-picked
+	// client(s) so claude-only/codex-only entries filter correctly.
+	clients, err := resolveClientsLenient(opts.client)
+	if err != nil {
+		return nil, opts, err
+	}
+	picked, err := promptServiceSelection(clients, opts.scope)
+	if err != nil {
+		return nil, opts, err
+	}
+	return picked, opts, nil
+}
+
+// resolveClientsLenient is like resolveClients but allows clients to be
+// missing from PATH (the user picked them in the form, presumably knowing
+// what they want installed — let the downstream commands surface any real
+// "not installed" errors).
+func resolveClientsLenient(client string) ([]string, error) {
+	switch client {
+	case "both":
+		return []string{"claude", "codex"}, nil
+	case "claude", "codex":
+		return []string{client}, nil
+	case "auto":
+		return resolveClients("auto")
+	}
+	return nil, fmt.Errorf("unknown client: %s", client)
+}
+
+func commandExists(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
+}
 
 // promptServiceSelection shows every service applicable to the active
 // client(s) in one multi-select with descriptions. Required + already-

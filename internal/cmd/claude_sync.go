@@ -27,7 +27,11 @@ import (
 // If allowList is non-nil the target set IS that list (defaults are not
 // auto-added) — used by the interactive picker so the user can opt out
 // of any service, including required ones. nil = legacy behavior.
-func syncClaudeDirect(scope string, optIn []string, force bool, quiet bool, allowList []string) error {
+//
+// installAutoHook controls whether the SessionStart cass-refresh-keys
+// hook is added; false leaves any existing hook alone but skips adding
+// a new one (for users who manage rotation themselves).
+func syncClaudeDirect(scope string, optIn []string, force bool, quiet bool, allowList []string, installAutoHook bool) error {
 	cfgScope := mapClaudeScope(scope)
 
 	settings, err := claudecfg.LoadSettings(cfgScope)
@@ -136,9 +140,11 @@ func syncClaudeDirect(scope string, optIn []string, force bool, quiet bool, allo
 		registered = append(registered, svc.Name)
 	}
 
-	// 5. Auto-update SessionStart hook.
-	if claudecfg.EnsureAutoUpdateHook(settings) {
-		logf("\n  hook: cass update on session start (added)\n")
+	// 5. Auto-update SessionStart hook (skipped when user opted out).
+	if installAutoHook {
+		if claudecfg.EnsureAutoUpdateHook(settings) {
+			logf("\n  hook: cass update on session start (added)\n")
+		}
 	}
 
 	if err := claudecfg.SaveSettings(cfgScope, settings); err != nil {

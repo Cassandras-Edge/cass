@@ -82,7 +82,10 @@ func runRefreshKeys(force bool, serviceFilter string, ifNearExpiry, quiet bool) 
 	}
 	projectID, _ := defaultProjectID(client)
 
-	settings, err := claudecfg.LoadSettings(claudecfg.ScopeUser)
+	// Load the MCP store (~/.claude.json) — where current Claude Code
+	// reads mcpServers from. The rotation looks at both user and project
+	// scopes so a service registered at either level gets refreshed.
+	mcpStore, err := claudecfg.LoadMCPStore()
 	if err != nil {
 		return err
 	}
@@ -105,11 +108,13 @@ func runRefreshKeys(force bool, serviceFilter string, ifNearExpiry, quiet bool) 
 		if serviceFilter != "" && svc.Name != serviceFilter {
 			continue
 		}
-		// Rotate keys for any service that's registered EITHER in
-		// settings.json (Claude) or in some codex config we can see —
-		// not just Claude. Otherwise codex-only setups never get their
-		// keys rotated.
-		registeredClaude := claudecfg.HasMCPServer(settings, svc.Name)
+		// Rotate keys for any service that's registered EITHER in the
+		// MCP store (Claude, user OR project scope) or in some codex
+		// config we can see — not just one. Otherwise codex-only or
+		// project-only setups never get their keys rotated.
+		hasUser, _ := mcpStore.HasMCP(claudecfg.ScopeUser, svc.Name)
+		hasProject, _ := mcpStore.HasMCP(claudecfg.ScopeProject, svc.Name)
+		registeredClaude := hasUser || hasProject
 		registeredCodex := codexRegisteredAnywhere(svc.Name)
 		if !registeredClaude && !registeredCodex {
 			continue
@@ -145,23 +150,38 @@ func runRefreshKeys(force bool, serviceFilter string, ifNearExpiry, quiet bool) 
 		freshKeys[svc.Name] = key
 
 		if registeredClaude {
-			// Refresh the Claude Authorization header in place.
+			// Rotate at whichever scope(s) the service lives in. URL
+			// comes from the existing entry first, falls back to the
+			// manifest if the entry is somehow missing one.
 			bundle, _ := manifest.Fetch(svc.Repo, svc.Name, false)
-			url := ""
+			var manifestURL string
 			if bundle != nil && bundle.Manifest.HasMCP() {
-				url = bundle.Manifest.MCP.URL
-			} else {
-				url = existingMCPURL(settings, svc.Name)
+				manifestURL = bundle.Manifest.MCP.URL
 			}
-			if url != "" {
-				claudecfg.UpsertMCPServer(settings, svc.Name, claudecfg.MCPServerSpec{
+			anyURL := false
+			for _, sc := range []claudecfg.Scope{claudecfg.ScopeUser, claudecfg.ScopeProject} {
+				has, _ := mcpStore.HasMCP(sc, svc.Name)
+				if !has {
+					continue
+				}
+				existing, _, _ := mcpStore.MCPEntry(sc, svc.Name)
+				url := existing.URL
+				if url == "" {
+					url = manifestURL
+				}
+				if url == "" {
+					continue
+				}
+				anyURL = true
+				_ = mcpStore.UpsertMCP(sc, svc.Name, claudecfg.MCPServerSpec{
 					Type: "http",
 					URL:  url,
 					Headers: map[string]string{
 						"Authorization": "Bearer " + key,
 					},
 				})
-			} else if !registeredCodex {
+			}
+			if !anyURL && !registeredCodex {
 				results = append(results, result{
 					service: svc.Name,
 					err:     errors.New("no URL available — re-run `cass setup` to register"),
@@ -174,8 +194,8 @@ func runRefreshKeys(force bool, serviceFilter string, ifNearExpiry, quiet bool) 
 		results = append(results, result{service: svc.Name, source: source})
 	}
 
-	if err := claudecfg.SaveSettings(claudecfg.ScopeUser, settings); err != nil {
-		return fmt.Errorf("write settings: %w", err)
+	if err := mcpStore.Save(); err != nil {
+		return fmt.Errorf("write ~/.claude.json: %w", err)
 	}
 
 	// Codex rewrite pass — patch inline Authorization headers in both
@@ -184,8 +204,9 @@ func runRefreshKeys(force bool, serviceFilter string, ifNearExpiry, quiet bool) 
 	// don't abort the run (Claude rotation already succeeded).
 	codexTouched := rewriteCodexConfigs(freshKeys, logf)
 
+	claudeJSON, _ := claudecfg.ClaudeJSONPath()
 	logf("\n")
-	logf("Rotated %d key(s) in Claude settings (%s).\n", rotated, mustSettingsPath())
+	logf("Rotated %d key(s) in %s.\n", rotated, claudeJSON)
 	if len(codexTouched) > 0 {
 		logf("Also rewrote: %s\n", strings.Join(codexTouched, ", "))
 	}
@@ -277,26 +298,6 @@ func rewriteCodexConfigs(freshKeys map[string]string, logf func(string, ...any))
 		touched = append(touched, path)
 	}
 	return touched
-}
-
-// existingMCPURL reads the URL of a registered MCP server from settings.
-// Used as a fallback when manifest fetch fails.
-func existingMCPURL(settings map[string]any, name string) string {
-	servers, _ := settings["mcpServers"].(map[string]any)
-	if servers == nil {
-		return ""
-	}
-	entry, _ := servers[name].(map[string]any)
-	if entry == nil {
-		return ""
-	}
-	url, _ := entry["url"].(string)
-	return url
-}
-
-func mustSettingsPath() string {
-	p, _ := claudecfg.SettingsPath(claudecfg.ScopeUser)
-	return p
 }
 
 // keyNeedsRefresh checks if a cached service key should be rotated. Returns

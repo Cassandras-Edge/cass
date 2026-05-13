@@ -34,7 +34,15 @@ import (
 func syncClaudeDirect(scope string, optIn []string, force bool, quiet bool, allowList []string, installAutoHook bool) error {
 	cfgScope := mapClaudeScope(scope)
 
+	// Two separate stores now: ~/.claude.json for MCP servers (where
+	// Claude Code v2.x actually reads them from), and ~/.claude/settings.json
+	// for hooks/permissions/skills/pluginConfigs (still the right home for
+	// non-MCP settings).
 	settings, err := claudecfg.LoadSettings(cfgScope)
+	if err != nil {
+		return err
+	}
+	mcpStore, err := claudecfg.LoadMCPStore()
 	if err != nil {
 		return err
 	}
@@ -57,14 +65,17 @@ func syncClaudeDirect(scope string, optIn []string, force bool, quiet bool, allo
 	if allowList != nil {
 		targets = resolveTargetServicesAllowList(allowList)
 		// Also: if the user dropped a previously-installed service, prune
-		// its mcpServers entry so the config reflects their selection.
-		pruneClaudeServicesNotIn(settings, allowList)
+		// its entry so the config reflects their selection.
+		pruneClaudeServicesNotIn(mcpStore, cfgScope, allowList)
 	} else {
 		targets = resolveTargetServices(optIn)
 	}
 	if len(targets) == 0 {
 		logf("No Cassandra services selected.\n")
-		return claudecfg.SaveSettings(cfgScope, settings)
+		if err := claudecfg.SaveSettings(cfgScope, settings); err != nil {
+			return err
+		}
+		return mcpStore.Save()
 	}
 
 	// 3. Portal client (needed for key minting). Resolve user's default
@@ -103,13 +114,17 @@ func syncClaudeDirect(scope string, optIn []string, force bool, quiet bool, allo
 				skipped = append(skipped, svc.Name)
 				continue
 			}
-			claudecfg.UpsertMCPServer(settings, svc.Name, claudecfg.MCPServerSpec{
+			if err := mcpStore.UpsertMCP(cfgScope, svc.Name, claudecfg.MCPServerSpec{
 				Type: "http",
 				URL:  m.MCP.URL,
 				Headers: map[string]string{
 					"Authorization": "Bearer " + key,
 				},
-			})
+			}); err != nil {
+				logf("  warning: register mcp: %v\n", err)
+				skipped = append(skipped, svc.Name)
+				continue
+			}
 			logf("  mcp:    %s\n", m.MCP.URL)
 		}
 
@@ -150,6 +165,9 @@ func syncClaudeDirect(scope string, optIn []string, force bool, quiet bool, allo
 	if err := claudecfg.SaveSettings(cfgScope, settings); err != nil {
 		return err
 	}
+	if err := mcpStore.Save(); err != nil {
+		return fmt.Errorf("write ~/.claude.json: %w", err)
+	}
 
 	logf("\nRegistered %d service(s)", len(registered))
 	if len(registered) > 0 {
@@ -180,17 +198,18 @@ func resolveTargetServicesAllowList(allow []string) []registry.Service {
 	return out
 }
 
-// pruneClaudeServicesNotIn removes mcpServers entries for any Cassandra-
-// known service NOT in `allow`. Other (non-Cassandra) entries are left
-// alone — we only manage what's in our registry.
-func pruneClaudeServicesNotIn(settings map[string]any, allow []string) {
+// pruneClaudeServicesNotIn removes MCP entries for any Cassandra-known
+// service NOT in `allow` from the given scope of ~/.claude.json. Other
+// (non-Cassandra) entries are left alone — we only manage what's in our
+// registry.
+func pruneClaudeServicesNotIn(store *claudecfg.MCPStore, scope claudecfg.Scope, allow []string) {
 	allowed := map[string]bool{}
 	for _, n := range allow {
 		allowed[n] = true
 	}
 	for _, s := range registry.Services {
 		if !allowed[s.Name] {
-			claudecfg.RemoveMCPServer(settings, s.Name)
+			_, _ = store.RemoveMCP(scope, s.Name)
 		}
 	}
 }
@@ -341,16 +360,22 @@ func mapClaudeScope(scope string) claudecfg.Scope {
 }
 
 // teardownClaudeDirect removes all Cassandra-managed entries from the
-// scope-appropriate settings.json. Also clears cached per-service keys.
+// scope-appropriate ~/.claude.json (MCPs) and .claude/settings.json
+// (hooks/skills). Also clears cached per-service keys.
 func teardownClaudeDirect(scope string, quiet bool) ([]string, error) {
 	cfgScope := mapClaudeScope(scope)
 	settings, err := claudecfg.LoadSettings(cfgScope)
 	if err != nil {
 		return nil, err
 	}
+	mcpStore, err := claudecfg.LoadMCPStore()
+	if err != nil {
+		return nil, err
+	}
 	removed := []string{}
 	for _, svc := range registry.Services {
-		if claudecfg.RemoveMCPServer(settings, svc.Name) {
+		gone, _ := mcpStore.RemoveMCP(cfgScope, svc.Name)
+		if gone {
 			removed = append(removed, svc.Name)
 			if !quiet {
 				fmt.Printf("  removed %s\n", svc.Name)
@@ -364,14 +389,15 @@ func teardownClaudeDirect(scope string, quiet bool) ([]string, error) {
 		_ = auth.ClearServiceKey(svc.Name)
 	}
 	// Also clean up the cass-managed auto-update hook + any cookie-sync
-	// hooks we may have installed.
+	// hooks we may have installed in settings.json.
 	claudecfg.RemoveAutoUpdateHook(settings)
 	for _, svc := range registry.Services {
-		// We don't know the manifest's cookieSync without re-fetching;
-		// best effort — strip any cookie-sync hook by canonical name.
 		claudecfg.RemoveCookieSyncHook(settings, svc.Name)
 	}
 	if err := claudecfg.SaveSettings(cfgScope, settings); err != nil {
+		return removed, err
+	}
+	if err := mcpStore.Save(); err != nil {
 		return removed, err
 	}
 	return removed, nil

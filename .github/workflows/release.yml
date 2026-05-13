@@ -9,41 +9,62 @@ permissions:
 
 jobs:
   build:
+    # Cross-compile every supported target from a single ubuntu runner. Go's
+    # cross-compiler doesn't need per-OS hosts when CGO is off (which we keep
+    # off — no sqlite C deps in the binary path, modernc.org/sqlite is pure Go).
+    runs-on: ubuntu-latest
     strategy:
       matrix:
         include:
-          - os: macos-latest
-            target: darwin-arm64
-          - os: ubuntu-latest
-            target: linux-amd64
-          - os: windows-latest
-            target: windows-amd64
-
-    runs-on: ${{ matrix.os }}
+          - target: darwin-amd64
+            goos: darwin
+            goarch: amd64
+            ext: ""
+          - target: darwin-arm64
+            goos: darwin
+            goarch: arm64
+            ext: ""
+          - target: linux-amd64
+            goos: linux
+            goarch: amd64
+            ext: ""
+          - target: linux-arm64
+            goos: linux
+            goarch: arm64
+            ext: ""
+          - target: windows-amd64
+            goos: windows
+            goarch: amd64
+            ext: ".exe"
 
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-go@v5
         with:
-          python-version: "3.13"
-
-      - name: Install dependencies
-        run: |
-          pip install pyinstaller
-          pip install .
+          go-version-file: go.mod
+          cache: true
 
       - name: Build binary
-        # --copy-metadata includes cass's .dist-info so that importlib.metadata
-        # can resolve the version inside the frozen binary. Without it,
-        # CURRENT_VERSION falls back to "0.0.0-dev".
-        run: pyinstaller --onefile --copy-metadata cass --name cass-${{ matrix.target }} --clean cass_entry.py
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+          TAG: ${{ github.ref_name }}
+        # ldflags mirrors scripts/release.sh — strip + stamp Version from the
+        # pushed tag so `cass --version` reflects the release identifier.
+        run: |
+          go build \
+            -trimpath \
+            -ldflags="-s -w -X github.com/Cassandras-Edge/cass/internal/cmd.Version=${TAG}" \
+            -o "cass-${{ matrix.target }}${{ matrix.ext }}" \
+            ./cmd/cass
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: cass-${{ matrix.target }}
-          path: dist/cass-*
+          path: cass-${{ matrix.target }}${{ matrix.ext }}
 
   release:
     needs: build
@@ -100,4 +121,68 @@ jobs:
             exit 0
           fi
           git commit -m "chore(scoop): bump to v${VERSION}"
+          git push origin main
+
+  bump-homebrew:
+    # Mirrors the scoop bump: pulls each darwin/linux asset, sha256s it, and
+    # rewrites homebrew/cass.rb with the new version + checksums in-place. The
+    # formula stays usable for anyone tapping this repo directly via
+    # `brew install Cassandras-Edge/cass/cass`.
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Bump homebrew formula
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF##*/}"
+          VERSION="${TAG#v}"
+
+          # Pull the four unix assets we ship — windows isn't part of the
+          # homebrew formula.
+          mkdir -p /tmp/release
+          for tgt in darwin-amd64 darwin-arm64 linux-amd64 linux-arm64; do
+            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --pattern "cass-${tgt}" --dir /tmp/release --clobber
+          done
+
+          SHA_DARWIN_AMD64=$(sha256sum /tmp/release/cass-darwin-amd64 | cut -d' ' -f1)
+          SHA_DARWIN_ARM64=$(sha256sum /tmp/release/cass-darwin-arm64 | cut -d' ' -f1)
+          SHA_LINUX_AMD64=$(sha256sum  /tmp/release/cass-linux-amd64  | cut -d' ' -f1)
+          SHA_LINUX_ARM64=$(sha256sum  /tmp/release/cass-linux-arm64  | cut -d' ' -f1)
+
+          # Rewrite the value adjacent to each `# bump-homebrew: KEY` marker.
+          # Idempotent — re-running the same tag is a no-op since values match.
+          export VERSION SHA_DARWIN_AMD64 SHA_DARWIN_ARM64 SHA_LINUX_AMD64 SHA_LINUX_ARM64
+          python3 <<'PY'
+          import os, re, pathlib
+          p = pathlib.Path("homebrew/cass.rb")
+          s = p.read_text()
+          for key in ("VERSION", "SHA_DARWIN_AMD64", "SHA_DARWIN_ARM64",
+                      "SHA_LINUX_AMD64", "SHA_LINUX_ARM64"):
+              val = os.environ[key]
+              s = re.sub(
+                  rf'"[^"]*"(\s*#\s*bump-homebrew:\s*{key}\b)',
+                  f'"{val}"\\1',
+                  s,
+              )
+          p.write_text(s)
+          PY
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add homebrew/cass.rb
+          if git diff --cached --quiet; then
+            echo "homebrew formula already up to date"
+            exit 0
+          fi
+          git commit -m "chore(homebrew): bump to v${VERSION}"
           git push origin main

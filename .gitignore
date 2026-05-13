@@ -5,3 +5,8 @@ dist/
 build/
 .venv/
 *.spec
+
+# Go build artifacts
+bin/
+*.test
+*.out

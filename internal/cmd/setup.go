@@ -10,9 +10,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
 
 	"github.com/Cassandras-Edge/cass/internal/auth"
+	"github.com/Cassandras-Edge/cass/internal/claudecfg"
 	"github.com/Cassandras-Edge/cass/internal/portal"
 	"github.com/Cassandras-Edge/cass/internal/registry"
 )
@@ -62,7 +64,7 @@ var scopeChoices = []string{"user", "project", "local"}
 func setupCmd() *cobra.Command {
 	var client, scope, deviceName string
 	var includes []string
-	var reauth bool
+	var reauth, nonInteractive bool
 	cmd := &cobra.Command{
 		Use:   "setup",
 		Short: "First-time Cassandra setup for Claude Code, Codex, or both",
@@ -79,18 +81,19 @@ Re-running setup is the canonical way to refresh manifests + rotate keys.`,
 			if err := validateChoice(scope, scopeChoices, "--scope"); err != nil {
 				return err
 			}
-			return runSetup(client, scope, includes, deviceName, reauth)
+			return runSetup(client, scope, includes, deviceName, reauth, nonInteractive)
 		},
 	}
 	cmd.Flags().StringVar(&client, "client", "auto", "Which client to set up: auto | claude | codex | both")
 	cmd.Flags().StringVar(&scope, "scope", "user", "Claude settings scope: user | project | local")
-	cmd.Flags().StringSliceVar(&includes, "with", nil, "Enable an optional service (repeatable, comma-separated, or 'all')")
+	cmd.Flags().StringSliceVar(&includes, "with", nil, "Enable an optional service (repeatable, comma-separated, or 'all'). Skips the interactive picker.")
 	cmd.Flags().StringVar(&deviceName, "device", "", "Device name to register (default: prompt with hostname)")
 	cmd.Flags().BoolVar(&reauth, "reauth", false, "Force a fresh device login even if creds look valid")
+	cmd.Flags().BoolVarP(&nonInteractive, "non-interactive", "y", false, "Don't prompt — install only required services + whatever --with names")
 	return cmd
 }
 
-func runSetup(client, scope string, includes []string, deviceName string, reauth bool) error {
+func runSetup(client, scope string, includes []string, deviceName string, reauth, nonInteractive bool) error {
 	clients, err := resolveClients(client)
 	if err != nil {
 		return err
@@ -114,7 +117,18 @@ func runSetup(client, scope string, includes []string, deviceName string, reauth
 		claudePluginUninstall(false)
 	}
 
+	// If the user didn't pre-pick optionals via --with and we're in a TTY,
+	// show a checklist. Required services always install regardless.
 	allOptional := union(optionalCodexServers, registryOptionalNames())
+	if len(includes) == 0 && !nonInteractive && isInteractive() {
+		already := alreadyInstalledOptionals(clients, scope, allOptional)
+		picked, err := promptOptionalServices(clients, allOptional, already)
+		if err != nil {
+			return err
+		}
+		includes = picked
+	}
+
 	optInClaude := resolveOptIns(includes, registryOptionalNames(), allOptional)
 	optInCodex := resolveOptIns(includes, optionalCodexServers, allOptional)
 
@@ -269,7 +283,7 @@ func claudeSetupCmd() *cobra.Command {
 			if err := validateChoice(scope, scopeChoices, "--scope"); err != nil {
 				return err
 			}
-			return runSetup("claude", scope, nil, "", false)
+			return runSetup("claude", scope, nil, "", false, false)
 		},
 	}
 	cmd.Flags().StringVar(&scope, "scope", "user", "Settings scope")
@@ -314,7 +328,7 @@ func codexSetupCmd() *cobra.Command {
 			if err := validateChoice(scope, codexScopeChoices, "--scope"); err != nil {
 				return err
 			}
-			return runSetup("codex", scope, includes, "", false)
+			return runSetup("codex", scope, includes, "", false, false)
 		},
 	}
 	cmd.Flags().StringSliceVar(&includes, "with", nil, "Enable an optional server (repeatable, comma-separated, or 'all')")
@@ -686,5 +700,107 @@ func union(a, b []string) []string {
 		out = append(out, s)
 	}
 	sort.Strings(out)
+	return out
+}
+
+// isInteractive reports whether stdin AND stdout are both TTYs. Both ends
+// matter — huh forms write to stdout and read from stdin, so a pipe on
+// either side breaks the form and we'd hang waiting for input that never
+// comes (or render gibberish into a log).
+func isInteractive() bool {
+	si, _ := os.Stdin.Stat()
+	so, _ := os.Stdout.Stat()
+	return (si.Mode()&os.ModeCharDevice) != 0 && (so.Mode()&os.ModeCharDevice) != 0
+}
+
+// promptOptionalServices shows a multi-select for the optional services
+// relevant to the active client(s). `preChecked` items start selected so a
+// repeat `cass setup` feels idempotent — the user sees their previous
+// choices and can adjust. Aborting via ctrl-c returns an error so we don't
+// silently proceed with an unintended config.
+func promptOptionalServices(clients, allOptional, preChecked []string) ([]string, error) {
+	// Filter optionals to those that apply to the active client set. If
+	// only codex is active, hide Claude-only optionals (and vice versa).
+	var pool []string
+	for _, name := range allOptional {
+		inClaude := contains(registryOptionalNames(), name)
+		inCodex := contains(optionalCodexServers, name)
+		if contains(clients, "claude") && inClaude {
+			pool = append(pool, name)
+			continue
+		}
+		if contains(clients, "codex") && inCodex {
+			pool = append(pool, name)
+		}
+	}
+	sort.Strings(pool)
+	if len(pool) == 0 {
+		return nil, nil
+	}
+
+	opts := make([]huh.Option[string], 0, len(pool))
+	for _, name := range pool {
+		opt := huh.NewOption(name, name)
+		if contains(preChecked, name) {
+			opt = opt.Selected(true)
+		}
+		opts = append(opts, opt)
+	}
+
+	selected := make([]string, 0, len(preChecked))
+	for _, name := range preChecked {
+		if contains(pool, name) {
+			selected = append(selected, name)
+		}
+	}
+	form := huh.NewMultiSelect[string]().
+		Title("Optional services").
+		Description("Required services install automatically — pick any extras (space to toggle, enter to confirm).").
+		Options(opts...).
+		Value(&selected).
+		Height(len(pool) + 4)
+
+	if err := form.Run(); err != nil {
+		if errors.Is(err, huh.ErrUserAborted) {
+			return nil, fmt.Errorf("setup aborted")
+		}
+		return nil, err
+	}
+	return selected, nil
+}
+
+// alreadyInstalledOptionals returns the names of optional services that
+// already have entries in the active scope's settings (Claude) or config
+// (Codex). Used to pre-check the interactive picker.
+func alreadyInstalledOptionals(clients []string, scope string, allOptional []string) []string {
+	installed := map[string]bool{}
+
+	if contains(clients, "claude") {
+		if settings, err := claudecfg.LoadSettings(claudecfg.Scope(scope)); err == nil {
+			if servers, ok := settings["mcpServers"].(map[string]any); ok {
+				for name := range servers {
+					installed[name] = true
+				}
+			}
+		}
+	}
+	if contains(clients, "codex") {
+		if path, err := codexConfigPath(codexScopeFor(scope)); err == nil {
+			if cfg, err := loadCodexConfig(path); err == nil {
+				if servers, ok := cfg["mcp_servers"].(map[string]any); ok {
+					for name := range servers {
+						installed[name] = true
+					}
+				}
+			}
+		}
+	}
+
+	out := make([]string, 0, len(installed))
+	for _, name := range allOptional {
+		if installed[name] {
+			out = append(out, name)
+		}
+	}
 	return out
 }

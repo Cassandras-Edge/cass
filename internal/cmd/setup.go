@@ -65,7 +65,7 @@ var scopeChoices = []string{"user", "project", "local"}
 func setupCmd() *cobra.Command {
 	opts := setupOptions{
 		client:            "auto",
-		scope:             "user",
+		scope:             "project",
 		installPatchedCLI: true,
 		installAutoHook:   true,
 	}
@@ -93,7 +93,7 @@ Re-running setup is the canonical way to refresh manifests + rotate keys.`,
 		},
 	}
 	cmd.Flags().StringVar(&opts.client, "client", "auto", "Which client to set up: auto | claude | codex | both")
-	cmd.Flags().StringVar(&opts.scope, "scope", "user", "Claude settings scope: user | project | local")
+	cmd.Flags().StringVar(&opts.scope, "scope", "project", "Settings scope: project | user | local")
 	cmd.Flags().StringSliceVar(&includes, "with", nil, "Enable an optional service (repeatable, comma-separated, or 'all'). Skips the interactive picker.")
 	cmd.Flags().StringVar(&opts.deviceName, "device", "", "Device name to register (default: prompt with hostname)")
 	cmd.Flags().BoolVar(&opts.reauth, "reauth", false, "Force a fresh device login even if creds look valid")
@@ -261,7 +261,7 @@ itself is not uninstalled.`,
 		},
 	}
 	cmd.Flags().StringVar(&client, "client", "auto", "Which client to tear down: auto | claude | codex | both")
-	cmd.Flags().StringVar(&scope, "scope", "user", "Claude settings scope to clean")
+	cmd.Flags().StringVar(&scope, "scope", "project", "Settings scope to clean")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Skip confirmation prompt")
 	return cmd
 }
@@ -346,7 +346,7 @@ func claudeSetupCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&scope, "scope", "user", "Settings scope")
+	cmd.Flags().StringVar(&scope, "scope", "project", "Settings scope")
 	return cmd
 }
 
@@ -363,7 +363,7 @@ func claudeTeardownCmd() *cobra.Command {
 			return runTeardown("claude", scope, yes)
 		},
 	}
-	cmd.Flags().StringVar(&scope, "scope", "user", "Settings scope to remove from")
+	cmd.Flags().StringVar(&scope, "scope", "project", "Settings scope to remove from")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Skip confirmation prompt")
 	return cmd
 }
@@ -395,7 +395,7 @@ func codexSetupCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringSliceVar(&includes, "with", nil, "Enable an optional server (repeatable, comma-separated, or 'all')")
-	cmd.Flags().StringVar(&scope, "scope", "user", "Codex config scope: user (~/.codex/config.toml) | project (<cwd>/.codex/config.toml)")
+	cmd.Flags().StringVar(&scope, "scope", "project", "Codex config scope: project (<cwd>/.codex/config.toml) | user (~/.codex/config.toml)")
 	return cmd
 }
 
@@ -413,7 +413,7 @@ func codexTeardownCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Skip confirmation prompt")
-	cmd.Flags().StringVar(&scope, "scope", "user", "Codex config scope to remove from: user | project")
+	cmd.Flags().StringVar(&scope, "scope", "project", "Codex config scope to remove from: project | user")
 	return cmd
 }
 
@@ -985,6 +985,8 @@ func runSetupForm(opts setupOptions) ([]string, setupOptions, error) {
 		}
 	}
 
+	// One question per group so huh paginates — the user sees a single
+	// focused screen at a time instead of a wall of selects.
 	componentsForm := huh.NewForm(
 		huh.NewGroup(
 			huh.NewSelect[string]().
@@ -996,27 +998,29 @@ func runSetupForm(opts setupOptions) ([]string, setupOptions, error) {
 					huh.NewOption("Codex only", "codex"),
 				).
 				Value(&clientChoice),
-
+		),
+		huh.NewGroup(
 			huh.NewSelect[string]().
 				Title("Settings scope").
-				Description("Where to write the mcpServers entries.").
+				Description("Project = this directory only (recommended). User = global on this machine.").
 				Options(
-					huh.NewOption("User — global (~/.claude, ~/.codex)", "user"),
 					huh.NewOption("Project — only this directory (<cwd>/.claude, <cwd>/.codex)", "project"),
-					huh.NewOption("Local — like project, but settings.local.json (Claude only)", "local"),
+					huh.NewOption("User — global (~/.claude, ~/.codex)", "user"),
 				).
 				Value(&opts.scope),
-
+		),
+		huh.NewGroup(
 			huh.NewConfirm().
 				Title("Install patched Claude CLI?").
 				Description("~/.local/bin/claude-patched — used by routines and stagehand. Safe to enable; doesn't replace `claude`.").
 				Value(&opts.installPatchedCLI),
-
+		),
+		huh.NewGroup(
 			huh.NewConfirm().
 				Title("Install auto-rotate hook?").
 				Description("SessionStart hook in Claude that runs `cass refresh-keys --if-near-expiry` so MCP keys self-heal.").
 				Value(&opts.installAutoHook),
-		).Title("Setup options"),
+		),
 	)
 
 	if err := componentsForm.Run(); err != nil {

@@ -21,10 +21,7 @@ import (
 	"github.com/Cassandras-Edge/cass/internal/config"
 )
 
-const (
-	twitterSharedKey = "twitter-mcp-queryids"
-	twitterUA        = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:135.0) Gecko/20100101 Firefox/135.0"
-)
+const twitterUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:135.0) Gecko/20100101 Firefox/135.0"
 
 var (
 	bundleURLPattern = regexp.MustCompile(`(?:src|href)=["'](https://abs\.twimg\.com/responsive-web/client-web[^"']+\.js)["']`)
@@ -75,10 +72,12 @@ func twitterSyncQueryIDsCmd() *cobra.Command {
 				fmt.Println("Dry run — not pushing.")
 				return nil
 			}
-			if err := pushTwitterQueryIDs(ids); err != nil {
+			applied, err := pushTwitterQueryIDs(ids)
+			if err != nil {
 				return err
 			}
-			fmt.Printf("Pushed to /service-credentials/%s ✓\n", twitterSharedKey)
+			fmt.Printf("Pushed %d ids to %s/admin/queryids — %d applied live ✓\n",
+				len(ids), config.TwitterMcpURL(), applied)
 			return nil
 		},
 	}
@@ -199,23 +198,35 @@ func scrapeXQueryIDs(cookies map[string]string) (map[string]string, error) {
 	return result, nil
 }
 
-func pushTwitterQueryIDs(ids map[string]string) error {
+// pushTwitterQueryIDs POSTs the scraped queryIds to twitter-mcp's /admin/queryids
+// endpoint. The service persists to auth and patches its in-process cache, so a
+// successful response means the live pod is already serving the new IDs — no
+// pod restart, no port-forward into auth.
+//
+// Returns (applied, err) where `applied` is the number of cache entries that
+// actually changed in-process. Auth is the shared admin secret from env/acl.env.
+func pushTwitterQueryIDs(ids map[string]string) (int, error) {
 	secret := config.AuthSecret()
 	if secret == "" {
-		return fmt.Errorf("AUTH_SECRET not set — service-credentials writes need the shared admin secret (env/acl.env)")
+		return 0, fmt.Errorf("AUTH_SECRET not set — /admin/queryids needs the shared admin secret (env/acl.env)")
 	}
 	body, _ := json.Marshal(map[string]any{"queryIds": ids})
-	req, _ := http.NewRequest("POST", config.AuthURL()+"/service-credentials/"+twitterSharedKey, bytes.NewReader(body))
+	req, _ := http.NewRequest("POST", config.TwitterMcpURL()+"/admin/queryids", bytes.NewReader(body))
 	req.Header.Set("X-Auth-Secret", secret)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		buf, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return fmt.Errorf("auth %s: %s", resp.Status, string(buf))
+		return 0, fmt.Errorf("twitter-mcp %s: %s", resp.Status, string(buf))
 	}
-	return nil
+	var out struct {
+		Applied int `json:"applied"`
+	}
+	buf, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	_ = json.Unmarshal(buf, &out)
+	return out.Applied, nil
 }

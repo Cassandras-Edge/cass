@@ -56,7 +56,33 @@ func configShowCmd() *cobra.Command {
 							fmt.Printf("    %s=%s\n", k, resolved.Env[k])
 						}
 					}
-					if len(resolved.Args) == 0 && len(resolved.Env) == 0 {
+					if len(resolved.Personas) > 0 {
+						fmt.Println("  personas:")
+						names := make([]string, 0, len(resolved.Personas))
+						for name := range resolved.Personas {
+							names = append(names, name)
+						}
+						sort.Strings(names)
+						for _, name := range names {
+							persona := resolved.Personas[name]
+							fmt.Printf("    %s\n", name)
+							if len(persona.Args) > 0 {
+								fmt.Printf("      args: %v\n", persona.Args)
+							}
+							if len(persona.Env) > 0 {
+								fmt.Println("      env:")
+								keys := make([]string, 0, len(persona.Env))
+								for k := range persona.Env {
+									keys = append(keys, k)
+								}
+								sort.Strings(keys)
+								for _, k := range keys {
+									fmt.Printf("        %s=%s\n", k, persona.Env[k])
+								}
+							}
+						}
+					}
+					if len(resolved.Args) == 0 && len(resolved.Env) == 0 && len(resolved.Personas) == 0 {
 						fmt.Println("  (section empty)")
 					}
 				}

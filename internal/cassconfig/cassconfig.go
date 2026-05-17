@@ -16,6 +16,9 @@
 //
 //	[codex]
 //	args = ["--ask-for-approval", "never"]
+//
+//	[codex.personas.finance]
+//	args = ["--profile", "finance"]
 package cassconfig
 
 import (
@@ -34,15 +37,30 @@ type File struct {
 
 // ClientConfig is the per-client section (same shape for claude and codex).
 type ClientConfig struct {
+	Args     []string                 `toml:"args"`
+	Env      map[string]string        `toml:"env"`
+	Personas map[string]PersonaConfig `toml:"personas"`
+}
+
+// PersonaConfig is a named args + env bundle under a client section.
+//
+// Example:
+//
+//	[codex.personas.finance]
+//	args = ["--profile", "finance"]
+//	[codex.personas.finance.env]
+//	CASS_PERSONA = "finance"
+type PersonaConfig struct {
 	Args []string          `toml:"args"`
 	Env  map[string]string `toml:"env"`
 }
 
 // Resolved is the effective config for one client, with provenance.
 type Resolved struct {
-	Args   []string
-	Env    map[string]string
-	Source string // path to the .cass.toml we read; "" if no file found
+	Args     []string
+	Env      map[string]string
+	Personas map[string]PersonaConfig
+	Source   string // path to the .cass.toml we read; "" if no file found
 }
 
 const fileName = ".cass.toml"
@@ -78,9 +96,10 @@ func LoadForCwd(cwd, client string) (*Resolved, error) {
 		return nil, fmt.Errorf("unknown client %q (expected claude or codex)", client)
 	}
 	return &Resolved{
-		Args:   section.Args,
-		Env:    section.Env,
-		Source: path,
+		Args:     section.Args,
+		Env:      section.Env,
+		Personas: section.Personas,
+		Source:   path,
 	}, nil
 }
 
@@ -139,6 +158,15 @@ const Template = `# .cass.toml — per-directory overrides for ` + "`cass claude
 
 # [codex]
 # args = []
+#
+# Named personas are explicit aliases. cass codex finance only expands
+# when finance is declared here; otherwise args pass through unchanged.
+#
+# [codex.personas.finance]
+# args = ["--profile", "finance"]
+#
+# [codex.personas.finance.env]
+# CASS_PERSONA = "finance"
 `
 
 // WriteTemplate creates a fresh .cass.toml at the given path, refusing to

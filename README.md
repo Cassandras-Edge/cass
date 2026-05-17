@@ -80,6 +80,7 @@ cass claude setup  # preferred Claude setup path
 | `cass setup` | Set up Claude plugins and/or Codex MCP servers |
 | `cass codex setup` | Set up Codex MCP servers and Codex auth env wiring |
 | `cass claude setup` | Set up the Cassandra Claude marketplace plugins |
+| `cass codex <persona>` | Launch Codex with a named `.cass.toml` persona, if configured |
 | `cass update` | Update to the latest version |
 
 ## Auto-update
@@ -94,3 +95,32 @@ cass claude setup  # preferred Claude setup path
 - Codex: `cass codex setup` provisions Cassandra MCP keys, registers the remote MCP servers with `codex mcp add`, and writes bearer-token exports to `~/.config/cass/codex-mcp.env`.
 
 For Codex, source the generated env file before launching Codex so the configured `bearer_token_env_var` entries resolve correctly.
+
+## Per-project personas
+
+`cass claude` and `cass codex` are passthrough wrappers. They load the first
+`.cass.toml` found from the current directory upward, then prepend configured
+args/env before execing the real client.
+
+You can define explicit named personas under a client section:
+
+```toml
+[codex]
+args = ["--search"]
+
+[codex.personas.finance]
+args = ["--profile", "finance"]
+
+[codex.personas.finance.env]
+CASS_PERSONA = "finance"
+```
+
+Then:
+
+```bash
+cass codex finance
+cass codex finance "scan today's market setup"
+```
+
+Only declared persona names expand. If the first argument is not a configured
+persona, `cass codex ...` remains a normal passthrough invocation.

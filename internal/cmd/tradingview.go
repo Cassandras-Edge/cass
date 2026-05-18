@@ -23,6 +23,7 @@ const defaultTradingViewExtensionURL = "https://github.com/Cassandras-Edge/cassa
 
 type tradingViewSetup struct {
 	proxyURL     string
+	backendURL   string
 	extensionSrc string
 	extensionURL string
 	extensionDir string
@@ -61,6 +62,7 @@ the generated proxy URL and MCP key.`,
 		},
 	}
 	cmd.Flags().StringVar(&opts.proxyURL, "proxy-url", defaultTradingViewProxyURL, "TradingView proxy base URL")
+	cmd.Flags().StringVar(&opts.backendURL, "backend-url", "", "Admin/onboarding: store this user's assigned internal TradingView proxy backend URL for shared-router routing")
 	cmd.Flags().StringVar(&opts.extensionSrc, "extension-src", "", "Source directory or ZIP for the unpacked extension (auto-detected in cassandra-stack)")
 	cmd.Flags().StringVar(&opts.extensionURL, "extension-url", defaultTradingViewExtensionURL, "GitHub release ZIP to use when no local extension source is found")
 	cmd.Flags().StringVar(&opts.extensionDir, "extension-dir", "", "Destination directory for the staged extension (default: ~/.cass/tradingview-extension)")
@@ -91,6 +93,13 @@ func runTradingViewSetup(opts tradingViewSetup) error {
 	if err := writeTradingViewSetupFile(dst, proxyURL, key, opts.extensionID); err != nil {
 		return err
 	}
+	if opts.backendURL != "" {
+		if err := pushCredentials(tradingViewProxyService, map[string]string{
+			"tradingview_proxy_backend": strings.TrimSpace(opts.backendURL),
+		}); err != nil {
+			return fmt.Errorf("store TradingView proxy backend assignment: %w", err)
+		}
+	}
 
 	fmt.Println("TradingView proxy setup")
 	if action == "created" {
@@ -101,6 +110,9 @@ func runTradingViewSetup(opts tradingViewSetup) error {
 	fmt.Printf("  Extension source: %s\n", source)
 	fmt.Printf("  Extension staged at: %s\n", dst)
 	fmt.Printf("  Proxy URL: %s\n", proxyURL)
+	if opts.backendURL != "" {
+		fmt.Printf("  Backend assignment stored: %s\n", strings.TrimSpace(opts.backendURL))
+	}
 	fmt.Printf("  Setup details: %s\n", filepath.Join(dst, "cass-setup.json"))
 	fmt.Println()
 	fmt.Println("Chrome setup:")

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -198,7 +199,10 @@ func stageTradingViewExtension(explicitSrc, extensionURL, dst string) (string, e
 	}
 	zipPath, cleanup, err := downloadTradingViewExtension(extensionURL)
 	if err != nil {
-		return "", err
+		zipPath, cleanup, err = downloadTradingViewExtensionWithGH()
+		if err != nil {
+			return "", err
+		}
 	}
 	defer cleanup()
 	if err := unzipExtension(zipPath, dst); err != nil {
@@ -236,6 +240,34 @@ func downloadTradingViewExtension(extensionURL string) (string, func(), error) {
 	if err := f.Close(); err != nil {
 		cleanup()
 		return "", func() {}, err
+	}
+	return path, cleanup, nil
+}
+
+func downloadTradingViewExtensionWithGH() (string, func(), error) {
+	if _, err := exec.LookPath("gh"); err != nil {
+		return "", func() {}, fmt.Errorf("download extension from GitHub: direct download failed and GitHub CLI is not available: %w", err)
+	}
+
+	dir, err := os.MkdirTemp("", "cass-tradingview-extension-gh-*")
+	if err != nil {
+		return "", func() {}, err
+	}
+	cleanup := func() { _ = os.RemoveAll(dir) }
+	cmd := exec.Command(
+		"gh", "release", "download",
+		"--repo", "Cassandras-Edge/cassandra-tradingview-proxy",
+		"--pattern", "cassandra-tradingview-proxy-extension.zip",
+		"--dir", dir,
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		cleanup()
+		return "", func() {}, fmt.Errorf("download extension with GitHub CLI: %w\n%s", err, strings.TrimSpace(string(out)))
+	}
+	path := filepath.Join(dir, "cassandra-tradingview-proxy-extension.zip")
+	if _, err := os.Stat(path); err != nil {
+		cleanup()
+		return "", func() {}, fmt.Errorf("download extension with GitHub CLI: %w", err)
 	}
 	return path, cleanup, nil
 }

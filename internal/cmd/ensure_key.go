@@ -27,6 +27,15 @@ func ensureKeyCmd() *cobra.Command {
 }
 
 func runEnsureKey(service string, quiet, asHeader bool) error {
+	key, action, err := ensureServiceKey(service, quiet || asHeader)
+	if err != nil {
+		return err
+	}
+	writeKey(key, service, quiet, asHeader, action)
+	return nil
+}
+
+func ensureServiceKey(service string, quiet bool) (string, string, error) {
 	// Cache hit: serve the cached key, but re-validate against portal first so
 	// stale-cache footguns (key revoked elsewhere) self-heal. Validate returns
 	// true on transient errors so we don't thrash on network blips — the MCP
@@ -35,22 +44,21 @@ func runEnsureKey(service string, quiet, asHeader bool) error {
 		c, err := portal.NewClient()
 		if err == nil && !c.ValidateKey(cached) {
 			_ = auth.ClearServiceKey(service)
-			if !quiet && !asHeader {
+			if !quiet {
 				fmt.Fprintf(os.Stderr, "Cached key for %s is no longer valid — re-provisioning...\n", service)
 			}
 		} else {
-			writeKey(cached, service, quiet, asHeader, "")
-			return nil
+			return cached, "", nil
 		}
 	}
 
 	// Cache miss (or just invalidated) — provision a fresh one.
 	c, err := portal.NewClient()
 	if err != nil {
-		return err
+		return "", "", err
 	}
 
-	if !quiet && !asHeader {
+	if !quiet {
 		fmt.Fprintf(os.Stderr, "Provisioning key for %s...\n", service)
 	}
 
@@ -68,18 +76,17 @@ func runEnsureKey(service string, quiet, asHeader bool) error {
 	body := map[string]string{"name": "cass-cli-" + service}
 	path := fmt.Sprintf("/api/projects/%s/services/%s/keys", projectID, service)
 	if err := c.Post(path, body, &created); err != nil {
-		return fmt.Errorf("create key for %s: %w", service, err)
+		return "", "", fmt.Errorf("create key for %s: %w", service, err)
 	}
 	if created.Key == "" {
-		return fmt.Errorf("portal returned empty key for %s", service)
+		return "", "", fmt.Errorf("portal returned empty key for %s", service)
 	}
 
 	if err := auth.SaveServiceKey(service, created.Key, c.Email()); err != nil {
-		return fmt.Errorf("cache key: %w", err)
+		return "", "", fmt.Errorf("cache key: %w", err)
 	}
 
-	writeKey(created.Key, service, quiet, asHeader, "created")
-	return nil
+	return created.Key, "created", nil
 }
 
 func writeKey(key, service string, quiet, asHeader bool, action string) {

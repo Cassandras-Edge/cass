@@ -44,6 +44,7 @@ var Services = []Service{
 	{Name: "tradingview-mcp", Repo: "Cassandras-Edge/cassandra-tradingview-mcp", Optional: true, Description: "TradingView — symbols, news, watchlists, OHLC"},
 	{Name: "schwab-mcp", Repo: "Cassandras-Edge/cassandra-schwab-mcp", Optional: true, Description: "Charles Schwab — account positions + orders (read)"},
 	{Name: "routines", Repo: "Cassandras-Edge/cassandra-routines", Optional: true, Description: "Routines — manage your scheduled Claude jobs"},
+	{Name: "flock-gateway", Repo: "Cassandras-Edge/cassandra-flock-gateway", Optional: true, Description: "flock — manage your codex automations (list/fire runs, read transcripts)"},
 }
 
 // Find returns the Service with the given name, or nil.

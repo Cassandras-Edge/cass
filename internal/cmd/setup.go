@@ -46,6 +46,7 @@ var codexServers = map[string]codexServerSpec{
 	"routines":        {Service: "routines", Subdomain: "routines-mcp"},
 	"schwab-mcp":      {Service: "schwab-mcp", Subdomain: "schwab"},
 	"gmail-mcp":       {Service: "gmail-mcp", Subdomain: "gmail-mcp"},
+	"flock-gateway":   {Service: "flock-gateway", Subdomain: "flock"},
 }
 
 var defaultCodexServers = []string{
@@ -54,7 +55,7 @@ var defaultCodexServers = []string{
 
 var optionalCodexServers = []string{
 	"claudeai-mcp", "gemini-mcp", "perplexity-mcp", "routines",
-	"tradingview-mcp", "schwab-mcp",
+	"tradingview-mcp", "schwab-mcp", "flock-gateway",
 }
 
 var codexScopeChoices = []string{"user", "project"}

@@ -48,6 +48,7 @@ func New() *cobra.Command {
 	root.AddCommand(discordCmd())
 	root.AddCommand(gmailCmd())
 	root.AddCommand(tradingViewCmd())
+	root.AddCommand(plaudCmd())
 	addStubs(root)
 	return root
 }

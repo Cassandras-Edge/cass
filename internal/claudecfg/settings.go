@@ -92,9 +92,9 @@ func SaveSettings(scope Scope, settings map[string]any) error {
 // MCPServerSpec is the canonical shape cass writes under
 // settings.json:mcpServers[name]. Matches Claude Code's documented schema.
 type MCPServerSpec struct {
-	Type    string            `json:"type"`    // always "http" for our services
-	URL     string             `json:"url"`
-	Headers map[string]string  `json:"headers,omitempty"`
+	Type    string            `json:"type"` // always "http" for our services
+	URL     string            `json:"url"`
+	Headers map[string]string `json:"headers,omitempty"`
 }
 
 // UpsertMCPServer registers or updates a single MCP server entry in

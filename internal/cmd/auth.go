@@ -27,16 +27,6 @@ var reauthStates = map[string]bool{
 	"reauth_required": true,
 }
 
-func authGroupCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "auth",
-		Short: "Authenticate against upstream services (Schwab, …)",
-	}
-	cmd.AddCommand(authSchwabCmd())
-	cmd.AddCommand(authStatusCmd())
-	return cmd
-}
-
 func authSchwabCmd() *cobra.Command {
 	var sessionID string
 	cmd := &cobra.Command{

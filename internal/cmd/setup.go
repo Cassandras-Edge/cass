@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -68,7 +69,6 @@ func setupCmd() *cobra.Command {
 	opts := setupOptions{
 		client:             "auto",
 		scope:              "project",
-		installPatchedCLI:  true,
 		installAutoHook:    true,
 		installShellRebind: true,
 	}
@@ -101,7 +101,6 @@ Re-running setup is the canonical way to refresh manifests + rotate keys.`,
 	cmd.Flags().StringVar(&opts.deviceName, "device", "", "Device name to register (default: prompt with hostname)")
 	cmd.Flags().BoolVar(&opts.reauth, "reauth", false, "Force a fresh device login even if creds look valid")
 	cmd.Flags().BoolVarP(&nonInteractive, "non-interactive", "y", false, "Don't prompt — use flag values as-is")
-	cmd.Flags().BoolVar(&opts.installPatchedCLI, "patched-cli", true, "Install claude-patched binary (used by routines, stagehand)")
 	cmd.Flags().BoolVar(&opts.installAutoHook, "auto-hook", true, "Install SessionStart hook that auto-rotates near-expiry MCP keys")
 	cmd.Flags().BoolVar(&opts.installShellRebind, "shell-rebind", true, "Add alias claude='cass claude' and codex='cass codex' to ~/.zshrc (managed block)")
 	return cmd
@@ -117,7 +116,6 @@ type setupOptions struct {
 	includes           []string // --with values; non-empty skips interactive
 	reauth             bool
 	nonInteractive     bool
-	installPatchedCLI  bool
 	installAutoHook    bool
 	installShellRebind bool
 }
@@ -128,8 +126,8 @@ func runSetup(opts setupOptions) error {
 		return err
 	}
 
-	// Interactive form — covers client, scope, patched-cli, hook, and
-	// the service catalog. Skipped if --with names something explicitly,
+	// Interactive form — covers client, scope, hook, and the service
+	// catalog. Skipped if --with names something explicitly,
 	// --non-interactive is set, or we're not on a TTY (pipes, CI, etc).
 	useAllowList := false
 	var allowList []string
@@ -159,16 +157,6 @@ func runSetup(opts setupOptions) error {
 	// `claude plugin install` left behind.
 	if contains(clients, "claude") {
 		claudePluginUninstall(false)
-	}
-
-	// Patched Claude CLI install — used by routines/stagehand. Run once,
-	// before either sync path, so claude + codex flows both see it.
-	if opts.installPatchedCLI {
-		fmt.Println()
-		fmt.Println("Updating patched Claude CLI...")
-		if err := installPatchedPrebuilt(""); err != nil {
-			fmt.Fprintf(os.Stderr, "  warning: patched-cli install: %v\n", err)
-		}
 	}
 
 	// Build per-client opt-in lists. In allow-list mode optInClaude/Codex
@@ -270,7 +258,68 @@ func runSetup(opts setupOptions) error {
 		}
 		fmt.Println("Restart Codex to activate the MCP servers (no env sourcing required).")
 	}
+
+	// flock client wiring — complementary to flock-gateway (the remote
+	// claude.ai control surface). flock runs codex agents on a Mac hub and
+	// loads CASS_MCP_KEY from ~/.cass/env, so the auth piece is already done by
+	// login. Here we (a) sanity-check that env carries CASS_MCP_KEY, and (b) if
+	// the user is sitting inside a .flock project, nudge them toward
+	// `cass flock wire`. Non-intrusive: a hint, plus an optional prompt on TTY.
+	maybeOfferFlockWire(useAllowList, allowList, opts.includes)
+
 	return nil
+}
+
+// maybeOfferFlockWire surfaces the flock client integration when flock is
+// relevant — i.e. flock-gateway was selected, or we're on macOS (where the
+// flock hub runs). It confirms CASS_MCP_KEY is present in ~/.cass/env and, when
+// the cwd is inside a .flock project, either offers to author its mcp.toml
+// (interactive) or prints the `cass flock wire` hint. It never fails setup.
+func maybeOfferFlockWire(useAllowList bool, allowList, includes []string) {
+	flockRelevant := runtime.GOOS == "darwin" || commandExists("flock")
+	if useAllowList {
+		flockRelevant = flockRelevant || contains(allowList, "flock-gateway")
+	} else {
+		flockRelevant = flockRelevant || contains(includes, "flock-gateway") || contains(includes, "all")
+	}
+	if !flockRelevant {
+		return
+	}
+
+	// CASS_MCP_KEY is what flock-server reads for the Cassandra fleet. It's
+	// written by `cass login`; ensureDeviceAuthorized ran above so it should be
+	// present, but warn (don't fail) if it isn't.
+	if creds, err := auth.Read(); err != nil || creds.MCPKey == "" {
+		fmt.Println()
+		fmt.Fprintln(os.Stderr, "  note: ~/.cass/env has no CASS_MCP_KEY — run `cass login` so flock can auth the fleet.")
+		return
+	}
+
+	cwd, _ := os.Getwd()
+	root, err := findFlockProjectRoot(cwd)
+	if err != nil {
+		// Not inside a flock project — nothing actionable, stay quiet.
+		return
+	}
+
+	fmt.Println()
+	fmt.Printf("flock project detected at %s.\n", root)
+	if !isInteractive() {
+		fmt.Println("  Wire the Cassandra fleet into it with: cass flock wire")
+		return
+	}
+	var doWire bool
+	confirm := huh.NewConfirm().
+		Title("Author this project's .flock/mcp.toml from the Cassandra fleet now?").
+		Description("Runs `cass flock wire` — pick which MCP servers this project's routines can use.").
+		Value(&doWire)
+	if err := confirm.Run(); err != nil || !doWire {
+		fmt.Println("  Skipped — run `cass flock wire` anytime to author it.")
+		return
+	}
+	if err := runFlockWire(nil); err != nil {
+		fmt.Fprintf(os.Stderr, "  warning: flock wire: %v\n", err)
+	}
 }
 
 // ─── teardown ──────────────────────────────────────────────────────────────
@@ -689,36 +738,6 @@ func teardownCodex(scope string) []string {
 	return removed
 }
 
-// installPatchedPrebuilt downloads the latest claude-patched binary for
-// the host platform. Same logic as `cass patched-cli install`, kept here
-// so setup can call it directly.
-func installPatchedPrebuilt(releaseTag string) error {
-	target, err := patchedHostTarget()
-	if err != nil {
-		return err
-	}
-	if _, err := exec.LookPath("gh"); err != nil {
-		return errors.New("gh CLI not found (skipping patched-cli install)")
-	}
-	binPath := patchedBinPath()
-	if err := os.MkdirAll(filepath.Dir(binPath), 0o755); err != nil {
-		return err
-	}
-	if err := os.Remove(binPath); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	args := []string{"release", "download"}
-	if releaseTag != "" {
-		args = append(args, "--tag", releaseTag)
-	}
-	args = append(args, "--repo", ccPatchesRepo, "--pattern", "claude-patched-"+target, "--output", binPath)
-	out, err := exec.Command("gh", args...).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("gh release download: %w\n%s", err, string(out))
-	}
-	return os.Chmod(binPath, 0o755)
-}
-
 // ─── helpers ───────────────────────────────────────────────────────────────
 
 func validateChoice(value string, choices []string, flagName string) error {
@@ -907,9 +926,9 @@ var (
 
 // runSetupForm is the full-suite interactive setup. Two huh.Form passes:
 //
-//  1. Components: which client(s) to configure, which scope, whether to
-//     install the patched Claude CLI, and whether to wire the auto-update
-//     SessionStart hook. Flag values pre-fill all four fields.
+//  1. Components: which client(s) to configure, which scope, and whether
+//     to wire the auto-update SessionStart hook. Flag values pre-fill all
+//     three fields.
 //
 //  2. Services: the per-service multi-select picker (existing logic).
 //     Built AFTER the components pass so its catalog reflects the
@@ -962,12 +981,6 @@ func runSetupForm(opts setupOptions) ([]string, setupOptions, error) {
 					huh.NewOption("User — global (~/.claude, ~/.codex)", "user"),
 				).
 				Value(&opts.scope),
-		),
-		huh.NewGroup(
-			huh.NewConfirm().
-				Title("Install patched Claude CLI?").
-				Description("~/.local/bin/claude-patched — used by routines and stagehand. Safe to enable; doesn't replace `claude`.").
-				Value(&opts.installPatchedCLI),
 		),
 		huh.NewGroup(
 			huh.NewConfirm().

@@ -140,7 +140,7 @@ func runPlaudLogin() error {
 		huh.NewGroup(
 			huh.NewInput().
 				Title("SMS code").
-				Description("the code Plaud just texted to "+phoneCode+" "+phoneNumber).
+				Description("the code Plaud just texted to " + phoneCode + " " + phoneNumber).
 				Value(&code).
 				Validate(func(s string) error {
 					if strings.TrimSpace(s) == "" {

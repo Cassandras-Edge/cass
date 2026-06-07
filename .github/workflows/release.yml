@@ -128,7 +128,11 @@ jobs:
     # rewrites homebrew/cass.rb with the new version + checksums in-place. The
     # formula stays usable for anyone tapping this repo directly via
     # `brew install Cassandras-Edge/cass/cass`.
-    needs: release
+    #
+    # needs bump-scoop (not just release) so the two bump jobs serialize their
+    # pushes to main — running both in parallel races on `git push` and the
+    # loser fails with a non-fast-forward rejection.
+    needs: bump-scoop
     runs-on: ubuntu-latest
     permissions:
       contents: write

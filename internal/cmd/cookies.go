@@ -53,12 +53,14 @@ var cookieServices = map[string]*cookieService{
 		Description:   "Twitter/X auth cookies",
 	},
 	"claude-ai": {
-		Name:          "claude-ai",
-		CredentialKey: "claude_cookies",
-		Domains:       []string{".claude.ai", "claude.ai"},
-		LoginURL:      "https://claude.ai/login",
-		ProbeURL:      "https://claude.ai",
-		Description:   "Claude.ai session cookies",
+		Name:           "claude-ai",
+		CredentialKey:  "claude_cookies",
+		Domains:        []string{".claude.ai", "claude.ai"},
+		LoginURL:       "https://claude.ai/login",
+		ProbeURL:       "https://claude.ai",
+		Description:    "Claude.ai session cookies",
+		RequiredCookie: []string{"sessionKey"},
+		SkipValidate:   true, // yt-dlp can't fetch claude.ai (not a media site)
 	},
 	"perplexity-mcp": {
 		Name:           "perplexity-mcp",
@@ -90,9 +92,6 @@ func cookiesSyncCmd() *cobra.Command {
 		Use:   "sync [services...]",
 		Short: "Extract Firefox cookies for one or more services and push them to auth",
 		RunE: func(_ *cobra.Command, args []string) error {
-			if _, err := exec.LookPath("yt-dlp"); err != nil {
-				return fmt.Errorf("yt-dlp required. Install: brew install yt-dlp")
-			}
 			targets := args
 			if len(targets) == 0 {
 				for k := range cookieServices {
@@ -265,38 +264,46 @@ func syncOneService(svc *cookieService, dryRun, noOpen bool) {
 		}
 	}
 	fmt.Println("  Extracting from firefox...")
-	lines, err := extractCookieLines("firefox", svc.ProbeURL)
-	if err != nil || len(lines) == 0 {
+	cookies, err := browser.ReadFirefoxCookies(svc.Domains)
+	if err != nil || len(cookies) == 0 {
 		promptLogin("No cookies found.")
 		return
 	}
 
 	var creds map[string]string
 	if svc.CookieNames != nil {
-		creds = extractNamedCookies(lines, svc.Domains, svc.CookieNames)
+		creds = map[string]string{}
+		for _, c := range cookies {
+			if mapped, ok := svc.CookieNames[c.Name]; ok {
+				creds[mapped] = c.Value
+			}
+		}
 		if len(creds) == 0 {
 			promptLogin("Cookies present but missing required keys.")
 			return
 		}
 	} else {
-		filtered := filterCookieLines(lines, svc.Domains)
-		if len(filtered) == 0 {
-			promptLogin(fmt.Sprintf("No cookies for %s.", strings.Join(svc.Domains, ", ")))
-			return
+		lines := make([]string, 0, len(cookies))
+		for _, c := range cookies {
+			lines = append(lines, c.NetscapeLine())
 		}
-		jar := "# Netscape HTTP Cookie File\n" + strings.Join(filtered, "\n") + "\n"
+		jar := "# Netscape HTTP Cookie File\n" + strings.Join(lines, "\n") + "\n"
 		creds = map[string]string{svc.CredentialKey: base64.StdEncoding.EncodeToString([]byte(jar))}
 	}
 
 	if !svc.SkipValidate && svc.CredentialKey != "" && creds[svc.CredentialKey] != "" {
-		fmt.Println("  Validating cookies...")
-		ok, detail := validateCookiesB64(creds[svc.CredentialKey], svc.ProbeURL)
-		if ok {
-			fmt.Printf("  Valid — %s\n", detail)
+		if _, err := exec.LookPath("yt-dlp"); err != nil {
+			fmt.Println("  (yt-dlp not installed — skipping fetch validation)")
 		} else {
-			fmt.Fprintf(os.Stderr, "  INVALID — %s\n", detail)
-			promptLogin("Cookies are stale or logged out.")
-			return
+			fmt.Println("  Validating cookies...")
+			ok, detail := validateCookiesB64(creds[svc.CredentialKey], svc.ProbeURL)
+			if ok {
+				fmt.Printf("  Valid — %s\n", detail)
+			} else {
+				fmt.Fprintf(os.Stderr, "  INVALID — %s\n", detail)
+				promptLogin("Cookies are stale or logged out.")
+				return
+			}
 		}
 	}
 
@@ -311,7 +318,7 @@ func syncOneService(svc *cookieService, dryRun, noOpen bool) {
 		}
 		if len(missing) > 0 {
 			fmt.Fprintf(os.Stderr, "  MISSING required cookies: %s\n", strings.Join(missing, ", "))
-			promptLogin(fmt.Sprintf("Visit %s in Firefox to get a fresh cf_clearance.", svc.ProbeURL))
+			promptLogin(fmt.Sprintf("Visit %s in Firefox to get fresh cookies.", svc.ProbeURL))
 			return
 		}
 	}
@@ -334,78 +341,6 @@ func syncOneService(svc *cookieService, dryRun, noOpen bool) {
 		keys = append(keys, k)
 	}
 	fmt.Printf("  Synced: %s ✓\n", strings.Join(keys, ", "))
-}
-
-// extractCookieLines shells out to yt-dlp to dump browser cookies for a probe URL.
-// Returns the lines of the Netscape jar file. yt-dlp handles browser-specific
-// decryption (Firefox/Chrome/Safari) for us. Status checks short-circuit this
-// via the internal/browser package; sync still needs yt-dlp for the actual jar.
-func extractCookieLines(browserName, probeURL string) ([]string, error) {
-	tmp, err := os.MkdirTemp("", "cass-cookies-")
-	if err != nil {
-		return nil, err
-	}
-	defer os.RemoveAll(tmp)
-	out := filepath.Join(tmp, "cookies.txt")
-	_ = exec.Command(
-		"yt-dlp", "--cookies-from-browser", browserName,
-		"--cookies", out, "--flat-playlist", "--skip-download", "--no-warnings",
-		probeURL,
-	).Run()
-	data, err := os.ReadFile(out)
-	if err != nil || len(data) == 0 {
-		return nil, nil
-	}
-	return strings.Split(string(data), "\n"), nil
-}
-
-func filterCookieLines(lines []string, domains []string) []string {
-	var out []string
-	for _, line := range lines {
-		if strings.HasPrefix(line, "#") || strings.TrimSpace(line) == "" {
-			continue
-		}
-		parts := strings.Split(line, "\t")
-		if len(parts) < 7 {
-			continue
-		}
-		host := parts[0]
-		for _, d := range domains {
-			if host == d || strings.HasSuffix(host, d) {
-				out = append(out, line)
-				break
-			}
-		}
-	}
-	return out
-}
-
-func extractNamedCookies(lines []string, domains []string, names map[string]string) map[string]string {
-	out := map[string]string{}
-	for _, line := range lines {
-		if strings.HasPrefix(line, "#") || strings.TrimSpace(line) == "" {
-			continue
-		}
-		parts := strings.Split(line, "\t")
-		if len(parts) < 7 {
-			continue
-		}
-		host, name, value := parts[0], parts[5], parts[6]
-		domainOK := false
-		for _, d := range domains {
-			if host == d || strings.HasSuffix(host, d) {
-				domainOK = true
-				break
-			}
-		}
-		if !domainOK {
-			continue
-		}
-		if mapped, ok := names[name]; ok {
-			out[mapped] = value
-		}
-	}
-	return out
 }
 
 func validateCookiesB64(jarB64, probeURL string) (bool, string) {

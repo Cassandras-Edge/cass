@@ -10,10 +10,142 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
 )
+
+// Cookie is a single cookie read from Firefox's moz_cookies table. Firefox
+// stores cookie values in plaintext, so no decryption is needed.
+type Cookie struct {
+	Host              string
+	Name              string
+	Value             string
+	Path              string
+	Expiry            int64
+	Secure            bool
+	IncludeSubdomains bool
+}
+
+// NetscapeLine emits one tab-separated Netscape cookie-jar line exactly as
+// yt-dlp/curl expect: 7 tab-separated fields —
+// host, includeSubdomains, path, secure, expiry, name, value.
+func (c Cookie) NetscapeLine() string {
+	bflag := func(b bool) string {
+		if b {
+			return "TRUE"
+		}
+		return "FALSE"
+	}
+	path := c.Path
+	if path == "" {
+		path = "/" // Netscape jars need a path field; yt-dlp emits "/" too.
+	}
+	return strings.Join([]string{
+		c.Host,
+		bflag(c.IncludeSubdomains),
+		path,
+		bflag(c.Secure),
+		strconv.FormatInt(c.Expiry, 10),
+		c.Name,
+		c.Value,
+	}, "\t")
+}
+
+// ReadFirefoxCookies returns all non-expired cookies whose host matches any of
+// `domains` using the same rule the cookies command uses elsewhere
+// (host == d || strings.HasSuffix(host, d)). Reads directly from Firefox's
+// plaintext moz_cookies — no yt-dlp, no decryption.
+func ReadFirefoxCookies(domains []string) ([]Cookie, error) {
+	db, tmp, schemaVer, err := openFirefoxCopy()
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	defer os.Remove(tmp)
+
+	// FF142+ (schema >= 16) stores expiry in ms; compare against a ms threshold
+	// in SQL, then normalize each expiry to seconds below. expiry == 0 means a
+	// session cookie and is left untouched.
+	now := expiryNowThreshold(schemaVer)
+	rows, err := db.Query(
+		"SELECT host, name, value, path, expiry, isSecure FROM moz_cookies " +
+			"WHERE expiry = 0 OR expiry > " + strconv.FormatInt(now, 10))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Cookie
+	for rows.Next() {
+		var (
+			host, name, value, path string
+			expiry                  int64
+			isSecure                int
+		)
+		if err := rows.Scan(&host, &name, &value, &path, &expiry, &isSecure); err != nil {
+			return nil, err
+		}
+		matched := false
+		for _, d := range domains {
+			if host == d || strings.HasSuffix(host, d) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		out = append(out, Cookie{
+			Host:              host,
+			Name:              name,
+			Value:             value,
+			Path:              path,
+			Expiry:            normalizeExpiry(expiry, schemaVer),
+			Secure:            isSecure != 0,
+			IncludeSubdomains: strings.HasPrefix(host, "."),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// normalizeExpiry converts a raw moz_cookies.expiry to Unix seconds. Firefox
+// 142+ (cookies DB schema user_version >= 16) stores expiry in MILLISECONDS;
+// older schemas store seconds. Session cookies (expiry == 0) are left as-is.
+// Mirrors yt-dlp's yt_dlp/cookies.py: `if db_schema_version >= 16 and expiry
+// is not None: expiry /= 1000`.
+func normalizeExpiry(expiry int64, schemaVer int) int64 {
+	if schemaVer >= 16 && expiry != 0 {
+		return expiry / 1000
+	}
+	return expiry
+}
+
+// expiryNowThreshold returns the current time in the same unit moz_cookies.expiry
+// uses for the given schema version: milliseconds for FF142+ (schema >= 16),
+// seconds otherwise. Used in SQL WHERE clauses that compare against raw expiry.
+func expiryNowThreshold(schemaVer int) int64 {
+	now := time.Now().Unix()
+	if schemaVer >= 16 {
+		return now * 1000
+	}
+	return now
+}
+
+// firefoxSchemaVersion reads PRAGMA user_version from an open moz_cookies DB.
+// Returns 0 on any error (treated as a pre-FF142 seconds-based schema).
+func firefoxSchemaVersion(db *sql.DB) int {
+	var v int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
+		return 0
+	}
+	return v
+}
 
 // FindFirefoxCookiesDB returns the path to the default Firefox profile's
 // cookies.sqlite, or "" if Firefox isn't installed / no profile found.
@@ -38,38 +170,40 @@ func FindFirefoxCookiesDB() string {
 }
 
 // openFirefoxCopy copies the cookies.sqlite to a temp file (Firefox may be
-// running and holding a WAL lock) and opens it read-only. Caller must close
-// the returned DB and remove the temp file.
-func openFirefoxCopy() (*sql.DB, string, error) {
+// running and holding a WAL lock) and opens it read-only. Also reads the DB
+// schema version (PRAGMA user_version) so callers can normalize the expiry
+// unit: FF142+ (schema >= 16) stores expiry in milliseconds, older schemas in
+// seconds. Caller must close the returned DB and remove the temp file.
+func openFirefoxCopy() (*sql.DB, string, int, error) {
 	src := FindFirefoxCookiesDB()
 	if src == "" {
-		return nil, "", fmt.Errorf("Firefox cookies.sqlite not found")
+		return nil, "", 0, fmt.Errorf("Firefox cookies.sqlite not found")
 	}
 	tmp, err := os.CreateTemp("", "cass-fox-*.sqlite")
 	if err != nil {
-		return nil, "", err
+		return nil, "", 0, err
 	}
 	tmpPath := tmp.Name()
 	sf, err := os.Open(src)
 	if err != nil {
 		tmp.Close()
 		os.Remove(tmpPath)
-		return nil, "", err
+		return nil, "", 0, err
 	}
 	if _, err := io.Copy(tmp, sf); err != nil {
 		sf.Close()
 		tmp.Close()
 		os.Remove(tmpPath)
-		return nil, "", err
+		return nil, "", 0, err
 	}
 	sf.Close()
 	tmp.Close()
 	db, err := sql.Open("sqlite", tmpPath+"?mode=ro")
 	if err != nil {
 		os.Remove(tmpPath)
-		return nil, "", err
+		return nil, "", 0, err
 	}
-	return db, tmpPath, nil
+	return db, tmpPath, firefoxSchemaVersion(db), nil
 }
 
 // HasFirefoxCookies returns true iff Firefox holds at least one non-expired
@@ -77,14 +211,16 @@ func openFirefoxCopy() (*sql.DB, string, error) {
 // cookie names must be present (and non-expired) on the matching hosts.
 // Fast: typical query is <5 ms after the SQLite copy.
 func HasFirefoxCookies(domains []string, requiredNames []string) bool {
-	db, tmp, err := openFirefoxCopy()
+	db, tmp, schemaVer, err := openFirefoxCopy()
 	if err != nil {
 		return false
 	}
 	defer db.Close()
 	defer os.Remove(tmp)
 
-	now := time.Now().Unix()
+	// Compare against a threshold in the same unit as the raw expiry column
+	// (ms for FF142+/schema >= 16, seconds otherwise).
+	now := expiryNowThreshold(schemaVer)
 	args := []any{}
 	placeholders := ""
 	for i, d := range domains {
@@ -133,7 +269,7 @@ func HasFirefoxCookies(domains []string, requiredNames []string) bool {
 // hostLike (SQL LIKE pattern, e.g. "%perplexity.ai") + name, or empty/0 if
 // not found. Used by `cookies refresh` to poll cf_clearance rotation.
 func ReadFirefoxCookie(hostLike, name string) (string, int64) {
-	db, tmp, err := openFirefoxCopy()
+	db, tmp, schemaVer, err := openFirefoxCopy()
 	if err != nil {
 		return "", 0
 	}
@@ -149,5 +285,7 @@ func ReadFirefoxCookie(hostLike, name string) (string, int64) {
 	if err := row.Scan(&value, &expiry); err != nil {
 		return "", 0
 	}
-	return value, expiry
+	// Normalize FF142+ (schema >= 16) millisecond expiry to Unix seconds so the
+	// returned value is comparable to time.Now().Unix() by callers.
+	return value, normalizeExpiry(expiry, schemaVer)
 }

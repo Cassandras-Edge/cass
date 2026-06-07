@@ -28,22 +28,6 @@ scoop install cass
 
 `cass update` auto-detects scoop-managed installs and delegates to `scoop update cass`, so updates stay in sync with scoop's manifest ledger.
 
-### Windows (native, SAC-friendly via pipx)
-
-Use this if Smart App Control is blocking the scoop-installed `cass.exe`. Runs cass through the PSF-signed Python interpreter — no unsigned binary for SAC to block.
-
-```powershell
-# One-time — Python + pipx (Python itself is SAC-trusted)
-winget install Python.Python.3.13
-python -m pip install --user pipx
-python -m pipx ensurepath   # restart the shell after this
-
-# Install cass (private repo — needs `gh auth login` or a PAT)
-python -m pipx install "git+https://github.com/Cassandras-Edge/cass.git"
-```
-
-`cass update` auto-detects pipx-managed installs and delegates to `pipx upgrade cass`.
-
 > `cass claude setup` currently still requires WSL for the Claude Code integration. The `cass` binary itself (auth, keys, Codex setup) works on native Windows via scoop.
 
 #### Smart App Control blocks

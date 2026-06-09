@@ -101,7 +101,7 @@ func plaudLoginCmd() *cobra.Command {
 	}
 	c.Flags().StringVar(&pasteToken, "token", "", "store a bearer JWT you already have (grab it from web.plaud.ai devtools)")
 	c.Flags().BoolVar(&useSMS, "sms", false, "use the phone + SMS one-time-code flow instead of reading the browser")
-	c.Flags().StringVar(&browser, "browser", "chrome", "browser to read the session from (chrome|brave|edge|chromium)")
+	c.Flags().StringVar(&browser, "browser", "chrome", "browser to read the session from (chrome|firefox|brave|edge|chromium)")
 	c.Flags().StringVar(&profile, "profile", "", "restrict to a browser profile by dir or display name (e.g. \"Profile 1\" or \"Plaud\") — use a dedicated profile so the backend owns the session")
 	return c
 }
@@ -275,9 +275,8 @@ func runPlaudBrowserLogin(browser, profile string) error {
 	if blob.WorkspaceToken == "" || blob.RefreshToken == "" {
 		return fmt.Errorf("found a Plaud session in %s but it has no tokens — open web.plaud.ai, sign in, then retry", browser)
 	}
-	// src is <profile>/Local Storage/leveldb/<file>; the profile is 3 dirs up.
-	profileDir := filepath.Base(filepath.Dir(filepath.Dir(filepath.Dir(src))))
-	fmt.Printf("Found Plaud session for %s (%s profile).\n", strings.TrimSpace(blob.UserName), profileDir)
+	fmt.Printf("Found Plaud session for %s (%s, %s profile).\n",
+		strings.TrimSpace(blob.UserName), browser, sessionProfileName(browser, src))
 	return storePlaudCreds(map[string]string{
 		"plaud_token":         blob.WorkspaceToken,
 		"plaud_refresh_token": blob.RefreshToken,
@@ -286,58 +285,117 @@ func runPlaudBrowserLogin(browser, profile string) error {
 	})
 }
 
-// findPlaudSession scans a Chromium-family browser's Local Storage leveldb files
-// for the freshest Plaud workspace session. It only READS the files (no leveldb
-// open) so it works while the browser is running and holding the DB lock.
+// findPlaudSession scans a browser's localStorage backing files for the freshest
+// Plaud workspace session. It only READS the files (no DB open) so it works
+// while the browser is running and holding the file lock — Chromium keeps
+// localStorage in a leveldb (.ldb/.log), Firefox in webappsstore.sqlite(-wal).
 func findPlaudSession(browser, profile string) (plaudWSBlob, string, error) {
-	roots, err := chromiumLevelDBDirs(browser, profile)
+	files, err := plaudSessionFiles(browser, profile)
 	if err != nil {
 		return plaudWSBlob{}, "", err
 	}
 	var best plaudWSBlob
 	var bestSrc string
 	scanned := 0
-	for _, dir := range roots {
-		entries, err := os.ReadDir(dir)
+	for _, path := range files {
+		raw, err := os.ReadFile(path)
 		if err != nil {
 			continue
 		}
-		for _, e := range entries {
-			name := e.Name()
-			if !strings.HasSuffix(name, ".ldb") && !strings.HasSuffix(name, ".log") {
+		scanned++
+		// Values may be UTF-16-encoded (NUL-interleaved); drop NULs so the
+		// regex matches either encoding.
+		cleaned := bytes.ReplaceAll(raw, []byte{0}, nil)
+		for _, m := range plaudWSBlobRE.FindAll(cleaned, -1) {
+			var arr []plaudWSBlob
+			if json.Unmarshal(m, &arr) != nil || len(arr) == 0 {
 				continue
 			}
-			path := filepath.Join(dir, name)
-			raw, err := os.ReadFile(path)
-			if err != nil {
-				continue
-			}
-			scanned++
-			// leveldb may hold values UTF-16-encoded (NUL-interleaved); drop NULs
-			// so the regex matches either encoding.
-			cleaned := bytes.ReplaceAll(raw, []byte{0}, nil)
-			for _, m := range plaudWSBlobRE.FindAll(cleaned, -1) {
-				var arr []plaudWSBlob
-				if json.Unmarshal(m, &arr) != nil || len(arr) == 0 {
-					continue
-				}
-				b := arr[0]
-				if b.WorkspaceToken != "" && b.ExpiresAt > best.ExpiresAt {
-					best, bestSrc = b, path
-				}
+			b := arr[0]
+			if b.WorkspaceToken != "" && b.ExpiresAt > best.ExpiresAt {
+				best, bestSrc = b, path
 			}
 		}
 	}
 	if bestSrc == "" {
 		if scanned == 0 {
-			if profile != "" {
+			if profile != "" && !isFirefox(browser) {
 				return plaudWSBlob{}, "", fmt.Errorf("no %s profile matching %q — available: %s", browser, profile, strings.Join(chromiumProfileNames(browser), ", "))
 			}
-			return plaudWSBlob{}, "", fmt.Errorf("no %s profile found — is %s installed? (try --browser brave|edge|chromium, or --token)", browser, browser)
+			return plaudWSBlob{}, "", fmt.Errorf("no %s profile/localStorage found — is %s installed? (try --browser firefox|brave|edge, or --token)", browser, browser)
 		}
 		return plaudWSBlob{}, "", fmt.Errorf("no Plaud session found in %s — sign in at web.plaud.ai in that browser, then retry (or use --token)", browser)
 	}
 	return best, bestSrc, nil
+}
+
+func isFirefox(browser string) bool { return strings.ToLower(browser) == "firefox" }
+
+// plaudSessionFiles returns the localStorage backing files to scan for a
+// browser, restricted to a profile when given.
+func plaudSessionFiles(browser, profile string) ([]string, error) {
+	if isFirefox(browser) {
+		return firefoxLocalStorageFiles(profile)
+	}
+	dirs, err := chromiumLevelDBDirs(browser, profile)
+	if err != nil {
+		return nil, err
+	}
+	var files []string
+	for _, dir := range dirs {
+		entries, _ := os.ReadDir(dir)
+		for _, e := range entries {
+			if n := e.Name(); strings.HasSuffix(n, ".ldb") || strings.HasSuffix(n, ".log") {
+				files = append(files, filepath.Join(dir, n))
+			}
+		}
+	}
+	return files, nil
+}
+
+// firefoxLocalStorageFiles returns webappsstore.sqlite(+ -wal) for each Firefox
+// profile (filtered by directory-name substring when profile is set).
+func firefoxLocalStorageFiles(profile string) ([]string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+	var base string
+	switch runtime.GOOS {
+	case "darwin":
+		base = filepath.Join(home, "Library", "Application Support", "Firefox", "Profiles")
+	case "linux":
+		base = filepath.Join(home, ".mozilla", "firefox")
+	case "windows":
+		base = filepath.Join(os.Getenv("APPDATA"), "Mozilla", "Firefox", "Profiles")
+	default:
+		return nil, fmt.Errorf("unsupported OS for browser capture: %s", runtime.GOOS)
+	}
+	profiles, _ := os.ReadDir(base)
+	var files []string
+	for _, p := range profiles {
+		if !p.IsDir() {
+			continue
+		}
+		if profile != "" && !strings.Contains(strings.ToLower(p.Name()), strings.ToLower(profile)) {
+			continue
+		}
+		for _, f := range []string{"webappsstore.sqlite", "webappsstore.sqlite-wal"} {
+			files = append(files, filepath.Join(base, p.Name(), f))
+		}
+	}
+	return files, nil
+}
+
+// sessionProfileName extracts the profile directory name from a scanned file
+// path for display (depth differs between Chromium and Firefox layouts).
+func sessionProfileName(browser, src string) string {
+	if isFirefox(browser) {
+		// .../Profiles/<profile>/webappsstore.sqlite
+		return filepath.Base(filepath.Dir(src))
+	}
+	// .../<profile>/Local Storage/leveldb/<file>
+	return filepath.Base(filepath.Dir(filepath.Dir(filepath.Dir(src))))
 }
 
 // chromiumBase returns the User-Data root for a Chromium-family browser on this OS.

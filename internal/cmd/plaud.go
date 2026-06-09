@@ -2,11 +2,17 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -17,16 +23,29 @@ import (
 	"github.com/Cassandras-Edge/cass/internal/config"
 )
 
-// Plaud auth is NOT OAuth — it's a phone + SMS one-time-code flow against the
-// consumer API at api.plaud.ai. Two calls:
+// Plaud auth is NOT OAuth. Two ways in:
 //
-//	POST /auth/sms/code {phone_code, phone_number}        -> sends SMS, returns a `token`
-//	POST /auth/login    {phone_code, phone_number, code, token} -> returns the bearer JWT
+//  1. BROWSER (default) — if you sign in to web.plaud.ai with Google/Apple SSO,
+//     there is no phone number, so the SMS flow below cannot work. Instead we
+//     read the live session straight out of Chrome's localStorage (leveldb,
+//     plaintext) the same way `cass tradingview`/`cass perplexity` lift cookies.
+//     Plaud's web session is a TWO-token model:
+//     - workspace_token (the bearer used for /file/* calls) — ~24h life
+//     - refresh_token                                       — ~27d HARD ceiling
+//     We capture both + the workspaceId; the backend refreshes the 24h token
+//     from the refresh_token on every sync (POST /user-app/auth/workspace/
+//     refresh/{wid}). After ~27d the refresh token expires for good and you
+//     re-run `cass plaud login` to capture a fresh pair.
 //
-// The JWT (~300-day life) is stored per-user in cassandra-auth under
-// credentials/{email}/plaud-mcp = {plaud_token, plaud_region} and is what
-// cassandra-plaud-mcp uses to mirror your recordings. `plaud_region` is left
-// empty here — the backend client auto-detects on a -302 region mismatch.
+//  2. SMS (`--sms`) — phone + one-time-code against api.plaud.ai. Only works
+//     for phone-number accounts:
+//     POST /auth/sms/code {phone_code, phone_number}              -> sends SMS
+//     POST /auth/login    {phone_code, phone_number, code, token} -> bearer JWT
+//
+// Either way the result lands in cassandra-auth under
+// credentials/{email}/plaud-mcp = {plaud_token, plaud_refresh_token,
+// plaud_workspace_id, plaud_region, ...} and drives cassandra-plaud-mcp's
+// mirror. `plaud_region` is left empty — the backend auto-detects on a -302.
 const (
 	plaudAPIBase     = "https://api.plaud.ai"
 	plaudAuthService = "plaud-mcp"
@@ -47,11 +66,14 @@ func plaudCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "plaud",
 		Short: "Link your Plaud account for the plaud-mcp service",
-		Long: "Capture your Plaud session JWT and store it in cassandra-auth.\n" +
-			"Plaud uses phone + SMS one-time-code login (not OAuth): you enter\n" +
-			"your phone number, Plaud texts a code, and the resulting bearer\n" +
-			"token (~300-day life) is pushed straight from this machine to\n" +
-			"cassandra-auth. The token never leaves your control.",
+		Long: "Capture your Plaud session and store it in cassandra-auth.\n\n" +
+			"By default this reads your live web.plaud.ai session from Chrome's\n" +
+			"local storage (workspace token + refresh token) — the right path for\n" +
+			"Google/Apple SSO accounts that have no phone number. The backend then\n" +
+			"refreshes the short-lived token automatically for ~27 days, after\n" +
+			"which you re-run this command.\n\n" +
+			"Use --sms for the phone + one-time-code flow (phone-number accounts),\n" +
+			"or --token to paste a bearer JWT you already have.",
 	}
 	cmd.AddCommand(plaudLoginCmd())
 	cmd.AddCommand(plaudStatusCmd())
@@ -60,18 +82,25 @@ func plaudCmd() *cobra.Command {
 
 func plaudLoginCmd() *cobra.Command {
 	var pasteToken string
+	var useSMS bool
+	var browser string
 	c := &cobra.Command{
 		Use:   "login",
-		Short: "Log in to Plaud (SMS code) and store the token in cassandra-auth",
+		Short: "Link Plaud — reads your Chrome session by default (use --sms or --token)",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if pasteToken != "" {
+			switch {
+			case pasteToken != "":
 				return storePlaudToken(strings.TrimSpace(pasteToken))
+			case useSMS:
+				return runPlaudLogin()
+			default:
+				return runPlaudBrowserLogin(browser)
 			}
-			return runPlaudLogin()
 		},
 	}
-	c.Flags().StringVar(&pasteToken, "token", "", "skip SMS login and store a bearer JWT you already have "+
-		"(escape hatch for SSO-only accounts — grab it from web.plaud.ai devtools)")
+	c.Flags().StringVar(&pasteToken, "token", "", "store a bearer JWT you already have (grab it from web.plaud.ai devtools)")
+	c.Flags().BoolVar(&useSMS, "sms", false, "use the phone + SMS one-time-code flow instead of reading the browser")
+	c.Flags().StringVar(&browser, "browser", "chrome", "browser to read the session from (chrome|brave|edge|chromium)")
 	return c
 }
 
@@ -188,16 +217,202 @@ func storePlaudToken(token string) error {
 	if !strings.HasPrefix(token, "eyJ") {
 		fmt.Println("Warning: token doesn't look like a JWT (expected to start with 'eyJ').")
 	}
-	fmt.Println("Pushing Plaud token to cassandra-auth...")
-	if err := pushCredentials(plaudAuthService, map[string]string{
-		"plaud_token":  token,
-		"plaud_region": "", // backend auto-detects region on -302 mismatch
-		"linked_at":    time.Now().UTC().Format(time.RFC3339),
-	}); err != nil {
+	// A bare token from --token / SMS has no refresh material; the backend will
+	// use it until it expires (24h for SSO workspace tokens). Decode the wid so
+	// the backend at least *could* refresh if a refresh token is added later.
+	return storePlaudCreds(map[string]string{
+		"plaud_token":        token,
+		"plaud_workspace_id": jwtClaimString(token, "wid"),
+		"plaud_region":       "", // backend auto-detects region on -302 mismatch
+	})
+}
+
+// storePlaudCreds merges in linked_at and pushes the full credential set.
+func storePlaudCreds(creds map[string]string) error {
+	creds["linked_at"] = time.Now().UTC().Format(time.RFC3339)
+	if _, ok := creds["plaud_region"]; !ok {
+		creds["plaud_region"] = ""
+	}
+	fmt.Println("Pushing Plaud session to cassandra-auth...")
+	if err := pushCredentials(plaudAuthService, creds); err != nil {
 		return err
 	}
-	fmt.Println("Plaud linked. plaud-mcp will mirror your recordings with this token.")
+	fmt.Println("Plaud linked. plaud-mcp will mirror your recordings.")
+	if rt := creds["plaud_refresh_token"]; rt != "" {
+		if exp := jwtExpiry(rt); !exp.IsZero() {
+			fmt.Printf("  Auto-refresh works until %s (%dd) — re-run `cass plaud login` after that.\n",
+				exp.Format("2006-01-02"), int(time.Until(exp).Hours()/24))
+		}
+	}
 	return nil
+}
+
+// ── Browser (Chrome) session capture ───────────────────────────────────────
+
+// plaudWSBlob mirrors the workspace object Plaud's web app persists in
+// localStorage (key holds a JSON array of these). Timestamps are epoch ms.
+type plaudWSBlob struct {
+	WorkspaceID      string `json:"workspaceId"`
+	Region           string `json:"region"`
+	UserName         string `json:"userName"`
+	WorkspaceToken   string `json:"workspaceToken"`
+	ExpiresAt        int64  `json:"expiresAt"`
+	RefreshToken     string `json:"refreshToken"`
+	RefreshExpiresAt int64  `json:"refreshExpiresAt"`
+}
+
+// localStorage stores values as a JSON array `[{"workspaceId":...}]`. Match the
+// whole array non-greedily; tokens are base64 (no braces) so this is safe.
+var plaudWSBlobRE = regexp.MustCompile(`\[\{"workspaceId".*?refreshExpiresAt":\d+\}\]`)
+
+func runPlaudBrowserLogin(browser string) error {
+	blob, src, err := findPlaudSession(browser)
+	if err != nil {
+		return err
+	}
+	if blob.WorkspaceToken == "" || blob.RefreshToken == "" {
+		return fmt.Errorf("found a Plaud session in %s but it has no tokens — open web.plaud.ai, sign in, then retry", browser)
+	}
+	fmt.Printf("Found Plaud session for %s in %s.\n", strings.TrimSpace(blob.UserName), filepath.Base(filepath.Dir(filepath.Dir(src))))
+	return storePlaudCreds(map[string]string{
+		"plaud_token":         blob.WorkspaceToken,
+		"plaud_refresh_token": blob.RefreshToken,
+		"plaud_workspace_id":  blob.WorkspaceID,
+		"plaud_region":        "", // detected server-side; blob.Region kept for reference only
+	})
+}
+
+// findPlaudSession scans a Chromium-family browser's Local Storage leveldb files
+// for the freshest Plaud workspace session. It only READS the files (no leveldb
+// open) so it works while the browser is running and holding the DB lock.
+func findPlaudSession(browser string) (plaudWSBlob, string, error) {
+	roots, err := chromiumLevelDBDirs(browser)
+	if err != nil {
+		return plaudWSBlob{}, "", err
+	}
+	var best plaudWSBlob
+	var bestSrc string
+	scanned := 0
+	for _, dir := range roots {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			name := e.Name()
+			if !strings.HasSuffix(name, ".ldb") && !strings.HasSuffix(name, ".log") {
+				continue
+			}
+			path := filepath.Join(dir, name)
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				continue
+			}
+			scanned++
+			// leveldb may hold values UTF-16-encoded (NUL-interleaved); drop NULs
+			// so the regex matches either encoding.
+			cleaned := bytes.ReplaceAll(raw, []byte{0}, nil)
+			for _, m := range plaudWSBlobRE.FindAll(cleaned, -1) {
+				var arr []plaudWSBlob
+				if json.Unmarshal(m, &arr) != nil || len(arr) == 0 {
+					continue
+				}
+				b := arr[0]
+				if b.WorkspaceToken != "" && b.ExpiresAt > best.ExpiresAt {
+					best, bestSrc = b, path
+				}
+			}
+		}
+	}
+	if bestSrc == "" {
+		if scanned == 0 {
+			return plaudWSBlob{}, "", fmt.Errorf("no %s profile found — is %s installed? (try --browser brave|edge|chromium, or --token)", browser, browser)
+		}
+		return plaudWSBlob{}, "", fmt.Errorf("no Plaud session found in %s — sign in at web.plaud.ai in that browser, then retry (or use --token)", browser)
+	}
+	return best, bestSrc, nil
+}
+
+// chromiumLevelDBDirs returns the per-profile Local Storage leveldb dirs for a
+// Chromium-family browser on this OS.
+func chromiumLevelDBDirs(browser string) ([]string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+	var base string
+	switch runtime.GOOS {
+	case "darwin":
+		base = filepath.Join(home, "Library", "Application Support", chromiumVendorPath(browser))
+	case "linux":
+		base = filepath.Join(home, ".config", chromiumVendorPath(browser))
+	case "windows":
+		base = filepath.Join(os.Getenv("LOCALAPPDATA"), chromiumVendorPath(browser), "User Data")
+	default:
+		return nil, fmt.Errorf("unsupported OS for browser capture: %s", runtime.GOOS)
+	}
+	// Profiles: Default + "Profile N".
+	var dirs []string
+	profiles, _ := os.ReadDir(base)
+	for _, p := range profiles {
+		if !p.IsDir() {
+			continue
+		}
+		if p.Name() == "Default" || strings.HasPrefix(p.Name(), "Profile ") {
+			dirs = append(dirs, filepath.Join(base, p.Name(), "Local Storage", "leveldb"))
+		}
+	}
+	sort.Strings(dirs)
+	return dirs, nil
+}
+
+func chromiumVendorPath(browser string) string {
+	switch strings.ToLower(browser) {
+	case "brave":
+		return filepath.Join("BraveSoftware", "Brave-Browser")
+	case "edge":
+		return filepath.Join("Microsoft", "Edge")
+	case "chromium":
+		return "Chromium"
+	default: // chrome
+		return filepath.Join("Google", "Chrome")
+	}
+}
+
+// ── JWT helpers (no signature check — we only read claims we already trust) ──
+
+func jwtPayload(token string) map[string]any {
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		return nil
+	}
+	b, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil
+	}
+	var m map[string]any
+	if json.Unmarshal(b, &m) != nil {
+		return nil
+	}
+	return m
+}
+
+func jwtClaimString(token, claim string) string {
+	if m := jwtPayload(token); m != nil {
+		if s, ok := m[claim].(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+func jwtExpiry(token string) time.Time {
+	if m := jwtPayload(token); m != nil {
+		if exp, ok := m["exp"].(float64); ok {
+			return time.Unix(int64(exp), 0)
+		}
+	}
+	return time.Time{}
 }
 
 func runPlaudStatus() error {
@@ -238,12 +453,32 @@ func runPlaudStatus() error {
 	}
 	fmt.Println("Plaud: LINKED")
 	if s, ok := raw["linked_at"].(string); ok {
-		fmt.Printf("  linked at: %s\n", s)
+		fmt.Printf("  linked at:      %s\n", s)
 	}
 	if s, ok := raw["plaud_region"].(string); ok && s != "" {
-		fmt.Printf("  region:    %s\n", s)
+		fmt.Printf("  region:         %s\n", s)
+	}
+	if tok, ok := raw["plaud_token"].(string); ok {
+		printTokenExpiry("  access token:   ", tok, "expired — backend will refresh on next sync")
+	}
+	if rt, ok := raw["plaud_refresh_token"].(string); ok && rt != "" {
+		printTokenExpiry("  refresh token:  ", rt, "EXPIRED — run `cass plaud login` to re-capture")
+	} else {
+		fmt.Println("  refresh token:  none — token won't auto-renew; re-link with `cass plaud login`")
 	}
 	return nil
+}
+
+func printTokenExpiry(label, token, expiredMsg string) {
+	exp := jwtExpiry(token)
+	if exp.IsZero() {
+		return
+	}
+	if d := time.Until(exp); d > 0 {
+		fmt.Printf("%svalid %s (%dd left)\n", label, exp.Format("2006-01-02"), int(d.Hours()/24))
+	} else {
+		fmt.Printf("%s%s\n", label, expiredMsg)
+	}
 }
 
 // plaudPost issues a browser-shaped POST and decodes the JSON envelope. It

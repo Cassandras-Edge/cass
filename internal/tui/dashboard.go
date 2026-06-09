@@ -55,6 +55,7 @@ var sections = []section{
 			{label: "discord", args: []string{"link", "discord", "login"}, svc: "discord-mcp"},
 			{label: "twitter", args: []string{"link", "twitter", "sync-queryids"}, svc: "twitter-mcp"},
 			{label: "tradingview", args: []string{"link", "tradingview", "setup"}, svc: "tradingview-mcp"},
+			{label: "schwab", args: []string{"link", "schwab"}, svc: "schwab-mcp"},
 			{label: "cookies", args: []string{"link", "cookies", "sync"}},
 		},
 	},
@@ -354,7 +355,7 @@ func probeBadges(creds auth.DeviceCreds, authErr error) map[string]bool {
 	}
 
 	// Only link-account services with a cheap per-service credentials lookup.
-	svcs := []string{"gmail-mcp", "plaud-mcp", "discord-mcp", "twitter-mcp", "tradingview-mcp"}
+	svcs := []string{"gmail-mcp", "plaud-mcp", "discord-mcp", "twitter-mcp", "tradingview-mcp", "schwab-mcp"}
 
 	deadline := 1500 * time.Millisecond
 	client := &http.Client{Timeout: deadline}

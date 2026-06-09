@@ -2,6 +2,11 @@ dist/
 build/
 
 # Go build artifacts
+cass
 bin/
 *.test
 *.out
+
+# Python leftovers
+__pycache__/
+*.pyc

@@ -34,6 +34,7 @@ var Services = []Service{
 	{Name: "yt-mcp", Repo: "Cassandras-Edge/cassandra-media-mcp", Description: "YouTube — transcribe + search videos (GPU-backed)"},
 	{Name: "twitter-mcp", Repo: "Cassandras-Edge/twitter-mcp", Description: "Twitter/X — search, threads, your feed (cookie auth)"},
 	{Name: "reddit-mcp", Repo: "Cassandras-Edge/reddit-mcp", Description: "Reddit — public posts + comment threads"},
+	{Name: "fetch-mcp", Repo: "Cassandras-Edge/cassandra-fetch-mcp", Description: "Fetch — any URL to clean content (WebFetch replacement)"},
 	{Name: "discord-mcp", Repo: "Cassandras-Edge/cassandra-discord-mcp", Description: "Discord — read your servers and DMs (via Matrix bridge)"},
 	{Name: "market-research", Repo: "Cassandras-Edge/cassandra-market-research", Description: "Market data — stocks, SEC filings, options, crypto"},
 
@@ -44,7 +45,7 @@ var Services = []Service{
 	{Name: "tradingview-mcp", Repo: "Cassandras-Edge/cassandra-tradingview-mcp", Optional: true, Description: "TradingView — symbols, news, watchlists, OHLC"},
 	{Name: "schwab-mcp", Repo: "Cassandras-Edge/cassandra-schwab-mcp", Optional: true, Description: "Charles Schwab — account positions + orders (read)"},
 	{Name: "routines", Repo: "Cassandras-Edge/cassandra-routines", Optional: true, Description: "Routines — manage your scheduled Claude jobs"},
-	{Name: "flock-gateway", Repo: "Cassandras-Edge/cassandra-flock-gateway", Optional: true, Description: "flock — manage your codex automations (list/fire runs, read transcripts)"},
+	{Name: "flock-mcp", Repo: "Cassandras-Edge/cassandra-flock-mcp", Optional: true, Description: "flock — manage your codex automations (list/fire runs, read transcripts)"},
 }
 
 // Find returns the Service with the given name, or nil.

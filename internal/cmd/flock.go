@@ -60,12 +60,12 @@ const (
 )
 
 // flockWireExclude is the set of codexServers entries that must NOT be offered
-// to `cass flock wire`. flock-gateway is the REMOTE claude.ai-facing control
+// to `cass flock wire`. flock-mcp is the REMOTE claude.ai-facing control
 // surface (flock.cassandrasedge.com) — it isn't a platform-provisioned fleet
 // key (ensureServiceKey 400s on it), and a local flock project already gets the
 // loopback control server (flockControlName) wired in unconditionally. Offering
 // it would only produce a dead picker row + a scary 400 on a wrong selection.
-var flockWireExclude = map[string]bool{"flock-gateway": true}
+var flockWireExclude = map[string]bool{"flock-mcp": true}
 
 // isFlockWirable reports whether a name is a Cassandra fleet service that
 // `cass flock wire` may wire (known in codexServers and not excluded).

@@ -47,7 +47,7 @@ var codexServers = map[string]codexServerSpec{
 	"routines":        {Service: "routines", Subdomain: "routines-mcp"},
 	"schwab-mcp":      {Service: "schwab-mcp", Subdomain: "schwab"},
 	"gmail-mcp":       {Service: "gmail-mcp", Subdomain: "gmail-mcp"},
-	"flock-gateway":   {Service: "flock-gateway", Subdomain: "flock"},
+	"flock-mcp":   {Service: "flock-mcp", Subdomain: "flock"},
 }
 
 var defaultCodexServers = []string{
@@ -56,7 +56,7 @@ var defaultCodexServers = []string{
 
 var optionalCodexServers = []string{
 	"claudeai-mcp", "gemini-mcp", "perplexity-mcp", "routines",
-	"tradingview-mcp", "schwab-mcp", "flock-gateway",
+	"tradingview-mcp", "schwab-mcp", "flock-mcp",
 }
 
 var codexScopeChoices = []string{"user", "project"}
@@ -259,7 +259,7 @@ func runSetup(opts setupOptions) error {
 		fmt.Println("Restart Codex to activate the MCP servers (no env sourcing required).")
 	}
 
-	// flock client wiring — complementary to flock-gateway (the remote
+	// flock client wiring — complementary to flock-mcp (the remote
 	// claude.ai control surface). flock runs codex agents on a Mac hub and
 	// loads CASS_MCP_KEY from ~/.cass/env, so the auth piece is already done by
 	// login. Here we (a) sanity-check that env carries CASS_MCP_KEY, and (b) if
@@ -271,16 +271,16 @@ func runSetup(opts setupOptions) error {
 }
 
 // maybeOfferFlockWire surfaces the flock client integration when flock is
-// relevant — i.e. flock-gateway was selected, or we're on macOS (where the
+// relevant — i.e. flock-mcp was selected, or we're on macOS (where the
 // flock hub runs). It confirms CASS_MCP_KEY is present in ~/.cass/env and, when
 // the cwd is inside a .flock project, either offers to author its mcp.toml
 // (interactive) or prints the `cass flock wire` hint. It never fails setup.
 func maybeOfferFlockWire(useAllowList bool, allowList, includes []string) {
 	flockRelevant := runtime.GOOS == "darwin" || commandExists("flock")
 	if useAllowList {
-		flockRelevant = flockRelevant || contains(allowList, "flock-gateway")
+		flockRelevant = flockRelevant || contains(allowList, "flock-mcp")
 	} else {
-		flockRelevant = flockRelevant || contains(includes, "flock-gateway") || contains(includes, "all")
+		flockRelevant = flockRelevant || contains(includes, "flock-mcp") || contains(includes, "all")
 	}
 	if !flockRelevant {
 		return

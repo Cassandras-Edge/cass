@@ -21,6 +21,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Cassandras-Edge/cass/internal/auth"
+	"github.com/Cassandras-Edge/cass/internal/browser"
 	"github.com/Cassandras-Edge/cass/internal/config"
 )
 
@@ -84,14 +85,17 @@ func plaudCmd() *cobra.Command {
 func plaudLoginCmd() *cobra.Command {
 	var pasteToken string
 	var paste bool
+	var cookies bool
 	var useSMS bool
 	var browser string
 	var profile string
 	c := &cobra.Command{
 		Use:   "login",
-		Short: "Link Plaud — reads your Chrome session by default (use --paste, --sms, or --token)",
+		Short: "Link Plaud — reads your Chrome session by default (--cookies for ~10mo durability)",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			switch {
+			case cookies:
+				return runPlaudCookieLogin()
 			case paste:
 				return runPlaudPasteLogin()
 			case pasteToken != "":
@@ -105,6 +109,7 @@ func plaudLoginCmd() *cobra.Command {
 	}
 	c.Flags().StringVar(&pasteToken, "token", "", "store a bearer JWT or a pasted workspaceList JSON blob")
 	c.Flags().BoolVar(&paste, "paste", false, "read the session JSON from your clipboard (see the devtools snippet this prints) — works in any browser, even private mode")
+	c.Flags().BoolVar(&cookies, "cookies", false, "capture the long-lived pld_urt cookie from Firefox (most durable, ~10 months)")
 	c.Flags().BoolVar(&useSMS, "sms", false, "use the phone + SMS one-time-code flow instead of reading the browser")
 	c.Flags().StringVar(&browser, "browser", "chrome", "browser to read the session from (chrome|firefox|brave|edge|chromium)")
 	c.Flags().StringVar(&profile, "profile", "", "restrict to a browser profile by dir or display name (e.g. \"Profile 1\" or \"Plaud\") — use a dedicated profile so the backend owns the session")
@@ -335,13 +340,84 @@ func storePlaudCreds(creds map[string]string) error {
 		return err
 	}
 	fmt.Println("Plaud linked. plaud-mcp will mirror your recordings.")
-	if rt := creds["plaud_refresh_token"]; rt != "" {
+	// Report the longest-lived renewal source so you know when to re-link.
+	if urt := creds["plaud_urt"]; urt != "" {
+		if exp := jwtExpiry(urt); !exp.IsZero() {
+			fmt.Printf("  Hands-off until %s (%dd) via the pld_urt cookie — re-run after that.\n",
+				exp.Format("2006-01-02"), int(time.Until(exp).Hours()/24))
+		}
+	} else if rt := creds["plaud_refresh_token"]; rt != "" {
 		if exp := jwtExpiry(rt); !exp.IsZero() {
 			fmt.Printf("  Auto-refresh works until %s (%dd) — re-run `cass plaud login` after that.\n",
 				exp.Format("2006-01-02"), int(time.Until(exp).Hours()/24))
 		}
 	}
 	return nil
+}
+
+// fetchPlaudCreds reads the currently-stored plaud-mcp credentials (best-effort)
+// so a partial capture (e.g. just the pld_urt cookie) can merge instead of
+// clobbering the existing session.
+func fetchPlaudCreds() map[string]string {
+	out := map[string]string{}
+	creds, err := auth.Read()
+	if err != nil {
+		return out
+	}
+	u := fmt.Sprintf("%s/api/extension/credentials/%s", config.PortalURL(), plaudAuthService)
+	req, _ := http.NewRequest("GET", u, nil)
+	req.Header.Set("CF-Access-Client-Id", creds.CFAccessClientID)
+	req.Header.Set("CF-Access-Client-Secret", creds.CFAccessClientSecret)
+	req.Header.Set("Authorization", "Bearer "+creds.MCPKey)
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		return out
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return out
+	}
+	var raw map[string]any
+	if json.NewDecoder(resp.Body).Decode(&raw) != nil {
+		return out
+	}
+	if inner, ok := raw["credentials"].(map[string]any); ok {
+		raw = inner
+	}
+	for k, v := range raw {
+		if s, ok := v.(string); ok {
+			out[k] = s
+		}
+	}
+	return out
+}
+
+// runPlaudCookieLogin captures the long-lived pld_urt user-refresh cookie from
+// Firefox (plaintext cookies.sqlite, same as the other cass cookie lifts). The
+// backend re-bootstraps the whole workspace session from it, so this is the
+// durable path — good for ~10 months instead of the workspace token's ~30 days.
+func runPlaudCookieLogin() error {
+	urt, exp := browser.ReadFirefoxCookie("%plaud.ai%", "pld_urt")
+	if urt == "" {
+		return fmt.Errorf("no pld_urt cookie in Firefox — sign into web.plaud.ai in Firefox with normal " +
+			"(non-private) settings, reload the page once, then retry (or use --paste)")
+	}
+	merged := fetchPlaudCreds()
+	merged["plaud_urt"] = urt
+	// The backend needs the workspace id to bootstrap; reuse the stored one, or
+	// discover it from a Chromium localStorage session if we've never linked.
+	if merged["plaud_workspace_id"] == "" {
+		if blob, _, e := findPlaudSession("chrome", ""); e == nil && blob.WorkspaceID != "" {
+			merged["plaud_workspace_id"] = blob.WorkspaceID
+		}
+	}
+	if merged["plaud_workspace_id"] == "" {
+		return fmt.Errorf("workspace id unknown — run `cass plaud login` (Chrome) once to capture it, then `cass plaud login --cookies`")
+	}
+	days := int(time.Until(time.Unix(exp, 0)).Hours() / 24)
+	fmt.Printf("Captured pld_urt cookie from Firefox (valid ~%dd). Backend now owns the session.\n", days)
+	fmt.Println("Tip: don't actively browse web.plaud.ai in this Firefox — it rotates the cookie out from under the backend.")
+	return storePlaudCreds(merged)
 }
 
 // ── Browser (Chrome) session capture ───────────────────────────────────────

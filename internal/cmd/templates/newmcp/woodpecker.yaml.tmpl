@@ -1,0 +1,47 @@
+when:
+  - event: [push, pull_request]
+
+steps:
+  - name: ci-scripts
+    image: alpine:3.21
+    environment:
+      GITHUB_TOKEN:
+        from_secret: github_token
+    commands:
+      - mkdir -p .ci
+      - 'wget -qO .ci/build.sh --header "Authorization: token $GITHUB_TOKEN" https://raw.githubusercontent.com/Cassandras-Edge/cassandra-stack/main/scripts/ci-build.sh'
+      - 'wget -qO .ci/notify.sh --header "Authorization: token $GITHUB_TOKEN" https://raw.githubusercontent.com/Cassandras-Edge/cassandra-stack/main/scripts/ci-notify.sh'
+      - chmod +x .ci/build.sh .ci/notify.sh
+
+  - name: deploy
+    image: moby/buildkit:v0.21.1
+    when:
+      - event: push
+        branch: main
+    environment:
+      AUTH_YAML_CONTENT:
+        from_secret: auth_yaml
+      GITHUB_TOKEN:
+        from_secret: github_token
+    commands:
+      - sh .ci/build.sh {{.ServiceID}} {{.ServiceID}} backend
+
+  - name: notify-success
+    image: alpine:3.21
+    when:
+      - status: success
+    environment:
+      DISCORD_WEBHOOK_URL:
+        from_secret: discord_webhook_url
+    commands:
+      - sh .ci/notify.sh success
+
+  - name: notify-failure
+    image: alpine:3.21
+    when:
+      - status: failure
+    environment:
+      DISCORD_WEBHOOK_URL:
+        from_secret: discord_webhook_url
+    commands:
+      - sh .ci/notify.sh failure

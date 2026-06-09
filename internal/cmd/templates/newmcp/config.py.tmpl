@@ -1,0 +1,21 @@
+"""Settings loaded from environment variables."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from cassandra_mcp_auth.settings import BaseSettings
+
+
+@dataclass(slots=True)
+class Settings(BaseSettings):
+    # Add service-specific settings here, e.g.:
+    # api_token: str = ""
+    pass
+
+
+def load_settings() -> Settings:
+    return Settings.from_env(
+        mcp_port_default={{.Port}},
+        # api_token=env_str("{{.EnvPrefix}}_API_TOKEN", ""),
+    )

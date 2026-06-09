@@ -1,0 +1,37 @@
+"""FastMCP server for Cassandra {{.Title}} MCP."""
+
+from __future__ import annotations
+
+import logging
+
+from cassandra_mcp_auth import create_cassandra_mcp
+from fastmcp import FastMCP
+
+from {{.Package}}.config import Settings
+
+logger = logging.getLogger(__name__)
+
+SERVICE_ID = "{{.ServiceID}}"
+
+INSTRUCTIONS = (
+    "# Cassandra {{.Title}}\n\n"
+    "Describe when an agent should reach for this server, what the tools "
+    "cover, and any usage caveats."
+)
+
+
+def create_mcp_server(settings: Settings) -> FastMCP:
+    """Create and configure the FastMCP server with auth and all tools."""
+    mcp = create_cassandra_mcp(
+        service_id=SERVICE_ID,
+        name="Cassandra {{.Title}}",
+        instructions=INSTRUCTIONS,
+        settings=settings,
+    )
+
+    @mcp.tool()
+    async def ping(message: str = "pong") -> dict:
+        """Example tool — replace with real tools."""
+        return {"service": SERVICE_ID, "message": message}
+
+    return mcp

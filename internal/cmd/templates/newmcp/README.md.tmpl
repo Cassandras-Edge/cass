@@ -1,0 +1,31 @@
+# {{.Dir}}
+
+Cassandra {{.Title}} MCP server. TODO: describe what it does.
+
+## Tools
+
+| Tool | Purpose |
+|------|---------|
+| `ping` | Example tool — replace with real tools |
+
+## Config
+
+| Env Var | Required | Description |
+|---------|----------|-------------|
+| `AUTH_URL` | Yes | Auth service URL |
+| `AUTH_SECRET` | Yes | Shared secret for auth service calls |
+| `MCP_PORT` | No | Bind port (default `{{.Port}}`) |
+
+## Dev
+
+```bash
+cd backend
+uv sync
+uv run {{.Repo}}
+```
+
+## Deploy
+
+Auto-deploys on push to main via Woodpecker CI → BuildKit → local registry → ArgoCD (`cassandra-k8s/apps/{{.ServiceID}}/`).
+
+Part of the [Cassandra](https://github.com/Cassandras-Edge) stack.

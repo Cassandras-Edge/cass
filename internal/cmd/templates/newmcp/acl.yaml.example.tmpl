@@ -1,0 +1,11 @@
+# Example ACL policy fragment for {{.ServiceID}}.
+# The real policy lives in cassandra-stack/env/acl.yaml (gitignored) and is
+# baked into the image at build time via the AUTH_YAML_CONTENT build arg.
+groups:
+  creators:
+    services:
+      {{.ServiceID}}:
+        access: allow
+        # tools:
+        #   deny:
+        #     - some_restricted_tool

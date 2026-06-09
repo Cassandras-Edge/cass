@@ -1,0 +1,24 @@
+"""Cassandra {{.Title}} MCP entrypoint."""
+
+from __future__ import annotations
+
+import logging
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
+
+logger = logging.getLogger(__name__)
+
+
+def cli() -> None:
+    from {{.Package}}.config import load_settings  # noqa: PLC0415
+    from {{.Package}}.mcp_server import create_mcp_server  # noqa: PLC0415
+
+    settings = load_settings()
+    logger.info("Starting Cassandra {{.Title}} MCP on %s:%d", settings.host, settings.mcp_port)
+    mcp = create_mcp_server(settings)
+    mcp.run(
+        transport="streamable-http",
+        host=settings.host,
+        port=settings.mcp_port,
+        uvicorn_config={"proxy_headers": True, "forwarded_allow_ips": "*"},
+    )

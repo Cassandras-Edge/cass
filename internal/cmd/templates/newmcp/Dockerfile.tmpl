@@ -1,0 +1,19 @@
+FROM 172.20.0.161:30500/cassandra/mcp-base:py3.12
+
+WORKDIR /app
+COPY pyproject.toml ./
+COPY src ./src
+
+RUN pip install --no-cache-dir "."
+
+# Bundle auth policy for local enforcement (injected at build time)
+ARG AUTH_YAML_CONTENT=""
+RUN if [ -n "$AUTH_YAML_CONTENT" ]; then printf '%s' "$AUTH_YAML_CONTENT" > /app/acl.yaml; fi
+
+ENV PYTHONUNBUFFERED=1 \
+    HOST=0.0.0.0 \
+    MCP_PORT={{.Port}}
+
+EXPOSE {{.Port}}
+
+CMD ["{{.Repo}}"]

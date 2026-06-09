@@ -273,7 +273,9 @@ func runPlaudBrowserLogin(browser string) error {
 	if blob.WorkspaceToken == "" || blob.RefreshToken == "" {
 		return fmt.Errorf("found a Plaud session in %s but it has no tokens — open web.plaud.ai, sign in, then retry", browser)
 	}
-	fmt.Printf("Found Plaud session for %s in %s.\n", strings.TrimSpace(blob.UserName), filepath.Base(filepath.Dir(filepath.Dir(src))))
+	// src is <profile>/Local Storage/leveldb/<file>; the profile is 3 dirs up.
+	profile := filepath.Base(filepath.Dir(filepath.Dir(filepath.Dir(src))))
+	fmt.Printf("Found Plaud session for %s (%s profile).\n", strings.TrimSpace(blob.UserName), profile)
 	return storePlaudCreds(map[string]string{
 		"plaud_token":         blob.WorkspaceToken,
 		"plaud_refresh_token": blob.RefreshToken,

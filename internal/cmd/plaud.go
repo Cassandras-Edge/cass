@@ -84,6 +84,7 @@ func plaudLoginCmd() *cobra.Command {
 	var pasteToken string
 	var useSMS bool
 	var browser string
+	var profile string
 	c := &cobra.Command{
 		Use:   "login",
 		Short: "Link Plaud — reads your Chrome session by default (use --sms or --token)",
@@ -94,13 +95,14 @@ func plaudLoginCmd() *cobra.Command {
 			case useSMS:
 				return runPlaudLogin()
 			default:
-				return runPlaudBrowserLogin(browser)
+				return runPlaudBrowserLogin(browser, profile)
 			}
 		},
 	}
 	c.Flags().StringVar(&pasteToken, "token", "", "store a bearer JWT you already have (grab it from web.plaud.ai devtools)")
 	c.Flags().BoolVar(&useSMS, "sms", false, "use the phone + SMS one-time-code flow instead of reading the browser")
 	c.Flags().StringVar(&browser, "browser", "chrome", "browser to read the session from (chrome|brave|edge|chromium)")
+	c.Flags().StringVar(&profile, "profile", "", "restrict to a browser profile by dir or display name (e.g. \"Profile 1\" or \"Plaud\") — use a dedicated profile so the backend owns the session")
 	return c
 }
 
@@ -265,8 +267,8 @@ type plaudWSBlob struct {
 // whole array non-greedily; tokens are base64 (no braces) so this is safe.
 var plaudWSBlobRE = regexp.MustCompile(`\[\{"workspaceId".*?refreshExpiresAt":\d+\}\]`)
 
-func runPlaudBrowserLogin(browser string) error {
-	blob, src, err := findPlaudSession(browser)
+func runPlaudBrowserLogin(browser, profile string) error {
+	blob, src, err := findPlaudSession(browser, profile)
 	if err != nil {
 		return err
 	}
@@ -274,8 +276,8 @@ func runPlaudBrowserLogin(browser string) error {
 		return fmt.Errorf("found a Plaud session in %s but it has no tokens — open web.plaud.ai, sign in, then retry", browser)
 	}
 	// src is <profile>/Local Storage/leveldb/<file>; the profile is 3 dirs up.
-	profile := filepath.Base(filepath.Dir(filepath.Dir(filepath.Dir(src))))
-	fmt.Printf("Found Plaud session for %s (%s profile).\n", strings.TrimSpace(blob.UserName), profile)
+	profileDir := filepath.Base(filepath.Dir(filepath.Dir(filepath.Dir(src))))
+	fmt.Printf("Found Plaud session for %s (%s profile).\n", strings.TrimSpace(blob.UserName), profileDir)
 	return storePlaudCreds(map[string]string{
 		"plaud_token":         blob.WorkspaceToken,
 		"plaud_refresh_token": blob.RefreshToken,
@@ -287,8 +289,8 @@ func runPlaudBrowserLogin(browser string) error {
 // findPlaudSession scans a Chromium-family browser's Local Storage leveldb files
 // for the freshest Plaud workspace session. It only READS the files (no leveldb
 // open) so it works while the browser is running and holding the DB lock.
-func findPlaudSession(browser string) (plaudWSBlob, string, error) {
-	roots, err := chromiumLevelDBDirs(browser)
+func findPlaudSession(browser, profile string) (plaudWSBlob, string, error) {
+	roots, err := chromiumLevelDBDirs(browser, profile)
 	if err != nil {
 		return plaudWSBlob{}, "", err
 	}
@@ -328,6 +330,9 @@ func findPlaudSession(browser string) (plaudWSBlob, string, error) {
 	}
 	if bestSrc == "" {
 		if scanned == 0 {
+			if profile != "" {
+				return plaudWSBlob{}, "", fmt.Errorf("no %s profile matching %q — available: %s", browser, profile, strings.Join(chromiumProfileNames(browser), ", "))
+			}
 			return plaudWSBlob{}, "", fmt.Errorf("no %s profile found — is %s installed? (try --browser brave|edge|chromium, or --token)", browser, browser)
 		}
 		return plaudWSBlob{}, "", fmt.Errorf("no Plaud session found in %s — sign in at web.plaud.ai in that browser, then retry (or use --token)", browser)
@@ -335,37 +340,95 @@ func findPlaudSession(browser string) (plaudWSBlob, string, error) {
 	return best, bestSrc, nil
 }
 
-// chromiumLevelDBDirs returns the per-profile Local Storage leveldb dirs for a
-// Chromium-family browser on this OS.
-func chromiumLevelDBDirs(browser string) ([]string, error) {
+// chromiumBase returns the User-Data root for a Chromium-family browser on this OS.
+func chromiumBase(browser string) (string, error) {
 	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		return filepath.Join(home, "Library", "Application Support", chromiumVendorPath(browser)), nil
+	case "linux":
+		return filepath.Join(home, ".config", chromiumVendorPath(browser)), nil
+	case "windows":
+		return filepath.Join(os.Getenv("LOCALAPPDATA"), chromiumVendorPath(browser), "User Data"), nil
+	default:
+		return "", fmt.Errorf("unsupported OS for browser capture: %s", runtime.GOOS)
+	}
+}
+
+// chromiumLevelDBDirs returns the per-profile Local Storage leveldb dirs for a
+// Chromium-family browser. When profile is set, only profiles whose directory
+// name OR display name (case-insensitively) matches are returned.
+func chromiumLevelDBDirs(browser, profile string) ([]string, error) {
+	base, err := chromiumBase(browser)
 	if err != nil {
 		return nil, err
 	}
-	var base string
-	switch runtime.GOOS {
-	case "darwin":
-		base = filepath.Join(home, "Library", "Application Support", chromiumVendorPath(browser))
-	case "linux":
-		base = filepath.Join(home, ".config", chromiumVendorPath(browser))
-	case "windows":
-		base = filepath.Join(os.Getenv("LOCALAPPDATA"), chromiumVendorPath(browser), "User Data")
-	default:
-		return nil, fmt.Errorf("unsupported OS for browser capture: %s", runtime.GOOS)
-	}
-	// Profiles: Default + "Profile N".
 	var dirs []string
 	profiles, _ := os.ReadDir(base)
 	for _, p := range profiles {
 		if !p.IsDir() {
 			continue
 		}
-		if p.Name() == "Default" || strings.HasPrefix(p.Name(), "Profile ") {
-			dirs = append(dirs, filepath.Join(base, p.Name(), "Local Storage", "leveldb"))
+		if p.Name() != "Default" && !strings.HasPrefix(p.Name(), "Profile ") {
+			continue
 		}
+		if profile != "" && !profileMatches(base, p.Name(), profile) {
+			continue
+		}
+		dirs = append(dirs, filepath.Join(base, p.Name(), "Local Storage", "leveldb"))
 	}
 	sort.Strings(dirs)
 	return dirs, nil
+}
+
+// profileMatches reports whether a profile directory matches the user's filter,
+// by directory name or by the display name in its Preferences file.
+func profileMatches(base, dirName, filter string) bool {
+	f := strings.ToLower(filter)
+	if strings.ToLower(dirName) == f {
+		return true
+	}
+	return strings.Contains(strings.ToLower(chromiumProfileDisplayName(base, dirName)), f)
+}
+
+func chromiumProfileDisplayName(base, dirName string) string {
+	raw, err := os.ReadFile(filepath.Join(base, dirName, "Preferences"))
+	if err != nil {
+		return ""
+	}
+	var prefs struct {
+		Profile struct {
+			Name string `json:"name"`
+		} `json:"profile"`
+	}
+	if json.Unmarshal(raw, &prefs) != nil {
+		return ""
+	}
+	return prefs.Profile.Name
+}
+
+// chromiumProfileNames lists "dir (display name)" for each profile, for errors.
+func chromiumProfileNames(browser string) []string {
+	base, err := chromiumBase(browser)
+	if err != nil {
+		return nil
+	}
+	var names []string
+	profiles, _ := os.ReadDir(base)
+	for _, p := range profiles {
+		if !p.IsDir() || (p.Name() != "Default" && !strings.HasPrefix(p.Name(), "Profile ")) {
+			continue
+		}
+		if dn := chromiumProfileDisplayName(base, p.Name()); dn != "" {
+			names = append(names, fmt.Sprintf("%q (%s)", p.Name(), dn))
+		} else {
+			names = append(names, fmt.Sprintf("%q", p.Name()))
+		}
+	}
+	return names
 }
 
 func chromiumVendorPath(browser string) string {

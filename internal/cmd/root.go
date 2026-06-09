@@ -106,6 +106,7 @@ func clientCmd() *cobra.Command {
 		Short: "Configure & run AI clients (Claude Code, Codex, flock)",
 	}
 	cmd.AddCommand(setupCmd())
+	cmd.AddCommand(addCmd())
 	cmd.AddCommand(claudeCmd())
 	cmd.AddCommand(codexCmd())
 	cmd.AddCommand(flockCmd())
@@ -158,6 +159,7 @@ func registerAliases(root *cobra.Command) {
 
 	// client group
 	root.AddCommand(alias("setup", setupCmd))
+	root.AddCommand(alias("add", addCmd))
 	root.AddCommand(alias("claude", claudeCmd))
 	root.AddCommand(alias("codex", codexCmd))
 	root.AddCommand(alias("flock", flockCmd))

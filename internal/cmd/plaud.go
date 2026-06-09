@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -82,14 +83,17 @@ func plaudCmd() *cobra.Command {
 
 func plaudLoginCmd() *cobra.Command {
 	var pasteToken string
+	var paste bool
 	var useSMS bool
 	var browser string
 	var profile string
 	c := &cobra.Command{
 		Use:   "login",
-		Short: "Link Plaud — reads your Chrome session by default (use --sms or --token)",
+		Short: "Link Plaud — reads your Chrome session by default (use --paste, --sms, or --token)",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			switch {
+			case paste:
+				return runPlaudPasteLogin()
 			case pasteToken != "":
 				return storePlaudToken(strings.TrimSpace(pasteToken))
 			case useSMS:
@@ -99,7 +103,8 @@ func plaudLoginCmd() *cobra.Command {
 			}
 		},
 	}
-	c.Flags().StringVar(&pasteToken, "token", "", "store a bearer JWT you already have (grab it from web.plaud.ai devtools)")
+	c.Flags().StringVar(&pasteToken, "token", "", "store a bearer JWT or a pasted workspaceList JSON blob")
+	c.Flags().BoolVar(&paste, "paste", false, "read the session JSON from your clipboard (see the devtools snippet this prints) — works in any browser, even private mode")
 	c.Flags().BoolVar(&useSMS, "sms", false, "use the phone + SMS one-time-code flow instead of reading the browser")
 	c.Flags().StringVar(&browser, "browser", "chrome", "browser to read the session from (chrome|firefox|brave|edge|chromium)")
 	c.Flags().StringVar(&profile, "profile", "", "restrict to a browser profile by dir or display name (e.g. \"Profile 1\" or \"Plaud\") — use a dedicated profile so the backend owns the session")
@@ -215,7 +220,97 @@ func extractPlaudJWT(resp map[string]any) string {
 	return ""
 }
 
+// plaudConsoleSnippet copies the live Plaud session to the clipboard from any
+// browser's devtools console (works even when nothing is persisted to disk).
+const plaudConsoleSnippet = `copy(localStorage.getItem(Object.keys(localStorage).find(k=>k.endsWith(':workspaceList'))))`
+
+// runPlaudPasteLogin reads the workspaceList JSON blob from the clipboard.
+func runPlaudPasteLogin() error {
+	fmt.Println("In the browser tab logged into web.plaud.ai, open the devtools")
+	fmt.Println("console (Cmd+Opt+K) and paste this, which copies your session:")
+	fmt.Println()
+	fmt.Println("    " + plaudConsoleSnippet)
+	fmt.Println()
+	clip, err := readClipboard()
+	if err != nil {
+		return fmt.Errorf("read clipboard: %w (run the snippet above first)", err)
+	}
+	clip = strings.TrimSpace(clip)
+	if clip == "" {
+		return fmt.Errorf("clipboard is empty — run the snippet above, then re-run `cass plaud login --paste`")
+	}
+	blob, err := parsePlaudSessionBlob(clip)
+	if err != nil {
+		return fmt.Errorf("clipboard isn't a Plaud session blob: %w", err)
+	}
+	fmt.Printf("Captured session for %s from clipboard.\n", strings.TrimSpace(blob.UserName))
+	return storePlaudCreds(map[string]string{
+		"plaud_token":         blob.WorkspaceToken,
+		"plaud_refresh_token": blob.RefreshToken,
+		"plaud_workspace_id":  blob.WorkspaceID,
+		"plaud_region":        "",
+	})
+}
+
+// parsePlaudSessionBlob accepts the localStorage `<id>:workspaceList` value
+// (a JSON array of workspace objects) or a single object, and returns the
+// freshest workspace with tokens.
+func parsePlaudSessionBlob(s string) (plaudWSBlob, error) {
+	s = strings.TrimSpace(s)
+	var arr []plaudWSBlob
+	if strings.HasPrefix(s, "[") {
+		if err := json.Unmarshal([]byte(s), &arr); err != nil {
+			return plaudWSBlob{}, err
+		}
+	} else {
+		var one plaudWSBlob
+		if err := json.Unmarshal([]byte(s), &one); err != nil {
+			return plaudWSBlob{}, err
+		}
+		arr = []plaudWSBlob{one}
+	}
+	var best plaudWSBlob
+	for _, b := range arr {
+		if b.WorkspaceToken != "" && b.ExpiresAt >= best.ExpiresAt {
+			best = b
+		}
+	}
+	if best.WorkspaceToken == "" || best.RefreshToken == "" {
+		return plaudWSBlob{}, fmt.Errorf("no workspace with both tokens found")
+	}
+	return best, nil
+}
+
+func readClipboard() (string, error) {
+	switch runtime.GOOS {
+	case "darwin":
+		out, err := exec.Command("pbpaste").Output()
+		return string(out), err
+	case "linux":
+		if out, err := exec.Command("wl-paste").Output(); err == nil {
+			return string(out), nil
+		}
+		out, err := exec.Command("xclip", "-selection", "clipboard", "-o").Output()
+		return string(out), err
+	default:
+		return "", fmt.Errorf("clipboard unsupported on %s — use --token", runtime.GOOS)
+	}
+}
+
 func storePlaudToken(token string) error {
+	// Accept a pasted workspaceList JSON blob as well as a bare JWT.
+	if strings.HasPrefix(token, "[") || strings.HasPrefix(token, "{") {
+		blob, err := parsePlaudSessionBlob(token)
+		if err != nil {
+			return fmt.Errorf("looks like JSON but isn't a Plaud session blob: %w", err)
+		}
+		return storePlaudCreds(map[string]string{
+			"plaud_token":         blob.WorkspaceToken,
+			"plaud_refresh_token": blob.RefreshToken,
+			"plaud_workspace_id":  blob.WorkspaceID,
+			"plaud_region":        "",
+		})
+	}
 	if !strings.HasPrefix(token, "eyJ") {
 		fmt.Println("Warning: token doesn't look like a JWT (expected to start with 'eyJ').")
 	}

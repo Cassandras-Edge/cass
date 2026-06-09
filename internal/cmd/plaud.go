@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,7 +16,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
 
 	"github.com/Cassandras-Edge/cass/internal/auth"
@@ -25,44 +23,28 @@ import (
 	"github.com/Cassandras-Edge/cass/internal/config"
 )
 
-// Plaud auth is NOT OAuth. Two ways in:
+// Plaud auth is NOT OAuth — we read the live web.plaud.ai session out of the
+// browser (the SMS one-time-code flow is gone: it mints a phone-only "shadow"
+// account separate from the Google/Apple SSO login, so it returns an empty
+// account on this tenant). Sources, by durability:
 //
-//  1. BROWSER (default) — if you sign in to web.plaud.ai with Google/Apple SSO,
-//     there is no phone number, so the SMS flow below cannot work. Instead we
-//     read the live session straight out of Chrome's localStorage (leveldb,
+//   - BROWSER (default) — lift the session from Chrome's localStorage (leveldb,
 //     plaintext) the same way `cass tradingview`/`cass perplexity` lift cookies.
 //     Plaud's web session is a TWO-token model:
 //     - workspace_token (the bearer used for /file/* calls) — ~24h life
 //     - refresh_token                                       — ~27d HARD ceiling
 //     We capture both + the workspaceId; the backend refreshes the 24h token
 //     from the refresh_token on every sync (POST /user-app/auth/workspace/
-//     refresh/{wid}). After ~27d the refresh token expires for good and you
-//     re-run `cass plaud login` to capture a fresh pair.
+//     refresh/{wid}). After ~27d the refresh token expires and you re-run login.
+//   - --cookies — capture the long-lived pld_urt user-refresh cookie from
+//     Firefox (~10 months); the backend re-bootstraps the whole session from it.
+//   - --paste / --token — clipboard or a pasted bearer JWT, for any browser.
 //
-//  2. SMS (`--sms`) — phone + one-time-code against api.plaud.ai. Only works
-//     for phone-number accounts:
-//     POST /auth/sms/code {phone_code, phone_number}              -> sends SMS
-//     POST /auth/login    {phone_code, phone_number, code, token} -> bearer JWT
-//
-// Either way the result lands in cassandra-auth under
-// credentials/{email}/plaud-mcp = {plaud_token, plaud_refresh_token,
-// plaud_workspace_id, plaud_region, ...} and drives cassandra-plaud-mcp's
-// mirror. `plaud_region` is left empty — the backend auto-detects on a -302.
-const (
-	plaudAPIBase     = "https://api.plaud.ai"
-	plaudAuthService = "plaud-mcp"
-)
-
-var plaudBrowserHeaders = map[string]string{
-	"Accept":       "*/*",
-	"Origin":       "https://web.plaud.ai",
-	"Referer":      "https://web.plaud.ai/",
-	"Content-Type": "application/json",
-	"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
-		"AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Safari/605.1.15",
-	"app-platform": "web",
-	"edit-from":    "web",
-}
+// The result lands in cassandra-auth under credentials/{email}/plaud-mcp =
+// {plaud_token, plaud_refresh_token, plaud_workspace_id, plaud_region, ...} and
+// drives cassandra-plaud-mcp's mirror. `plaud_region` is left empty — the
+// backend auto-detects on a -302.
+const plaudAuthService = "plaud-mcp"
 
 func plaudCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -70,12 +52,12 @@ func plaudCmd() *cobra.Command {
 		Short: "Link your Plaud account for the plaud-mcp service",
 		Long: "Capture your Plaud session and store it in cassandra-auth.\n\n" +
 			"By default this reads your live web.plaud.ai session from Chrome's\n" +
-			"local storage (workspace token + refresh token) — the right path for\n" +
-			"Google/Apple SSO accounts that have no phone number. The backend then\n" +
+			"local storage (workspace token + refresh token). The backend then\n" +
 			"refreshes the short-lived token automatically for ~27 days, after\n" +
 			"which you re-run this command.\n\n" +
-			"Use --sms for the phone + one-time-code flow (phone-number accounts),\n" +
-			"or --token to paste a bearer JWT you already have.",
+			"Use --cookies for the most durable path (the ~10-month pld_urt cookie\n" +
+			"from Firefox), --paste to read the session from your clipboard, or\n" +
+			"--token to store a bearer JWT you already have.",
 	}
 	cmd.AddCommand(plaudLoginCmd())
 	cmd.AddCommand(plaudStatusCmd())
@@ -86,7 +68,6 @@ func plaudLoginCmd() *cobra.Command {
 	var pasteToken string
 	var paste bool
 	var cookies bool
-	var useSMS bool
 	var browser string
 	var profile string
 	c := &cobra.Command{
@@ -100,8 +81,6 @@ func plaudLoginCmd() *cobra.Command {
 				return runPlaudPasteLogin()
 			case pasteToken != "":
 				return storePlaudToken(strings.TrimSpace(pasteToken))
-			case useSMS:
-				return runPlaudLogin()
 			default:
 				return runPlaudBrowserLogin(browser, profile)
 			}
@@ -110,7 +89,6 @@ func plaudLoginCmd() *cobra.Command {
 	c.Flags().StringVar(&pasteToken, "token", "", "store a bearer JWT or a pasted workspaceList JSON blob")
 	c.Flags().BoolVar(&paste, "paste", false, "read the session JSON from your clipboard (see the devtools snippet this prints) — works in any browser, even private mode")
 	c.Flags().BoolVar(&cookies, "cookies", false, "capture the long-lived pld_urt cookie from Firefox (most durable, ~10 months)")
-	c.Flags().BoolVar(&useSMS, "sms", false, "use the phone + SMS one-time-code flow instead of reading the browser")
 	c.Flags().StringVar(&browser, "browser", "chrome", "browser to read the session from (chrome|firefox|brave|edge|chromium)")
 	c.Flags().StringVar(&profile, "profile", "", "restrict to a browser profile by dir or display name (e.g. \"Profile 1\" or \"Plaud\") — use a dedicated profile so the backend owns the session")
 	return c
@@ -124,105 +102,6 @@ func plaudStatusCmd() *cobra.Command {
 			return runPlaudStatus()
 		},
 	}
-}
-
-func runPlaudLogin() error {
-	var phoneCode, phoneNumber string
-	form := huh.NewForm(
-		huh.NewGroup(
-			huh.NewInput().
-				Title("Country calling code").
-				Description("digits only, no '+' (e.g. 1 for US, 44 for UK)").
-				Value(&phoneCode).
-				Validate(func(s string) error {
-					s = strings.TrimSpace(strings.TrimPrefix(s, "+"))
-					if s == "" {
-						return errors.New("required")
-					}
-					return nil
-				}),
-			huh.NewInput().
-				Title("Phone number").
-				Description("the number on your Plaud account, no spaces").
-				Value(&phoneNumber).
-				Validate(func(s string) error {
-					if strings.TrimSpace(s) == "" {
-						return errors.New("required")
-					}
-					return nil
-				}),
-		),
-	)
-	if err := form.Run(); err != nil {
-		return err
-	}
-	phoneCode = strings.TrimSpace(strings.TrimPrefix(phoneCode, "+"))
-	phoneNumber = strings.TrimSpace(phoneNumber)
-
-	// Step 1: trigger the SMS, capture the verification token.
-	fmt.Println("Requesting SMS code from Plaud...")
-	smsResp, err := plaudPost("/auth/sms/code", map[string]any{
-		"phone_code":   phoneCode,
-		"phone_number": phoneNumber,
-	})
-	if err != nil {
-		return fmt.Errorf("send SMS code: %w", err)
-	}
-	verifyToken := firstString(smsResp, "token", "verify_token", "captcha_token")
-	if verifyToken == "" {
-		// Some tenants don't return a session token from this step; /auth/login
-		// may still accept an empty one. Warn but continue.
-		fmt.Println("  (no verification token returned — continuing)")
-	}
-
-	// Step 2: read the code the user just received, exchange for the JWT.
-	var code string
-	codeForm := huh.NewForm(
-		huh.NewGroup(
-			huh.NewInput().
-				Title("SMS code").
-				Description("the code Plaud just texted to " + phoneCode + " " + phoneNumber).
-				Value(&code).
-				Validate(func(s string) error {
-					if strings.TrimSpace(s) == "" {
-						return errors.New("required")
-					}
-					return nil
-				}),
-		),
-	)
-	if err := codeForm.Run(); err != nil {
-		return err
-	}
-	code = strings.TrimSpace(code)
-
-	fmt.Println("Exchanging code for token...")
-	loginResp, err := plaudPost("/auth/login", map[string]any{
-		"phone_code":   phoneCode,
-		"phone_number": phoneNumber,
-		"code":         code,
-		"token":        verifyToken,
-	})
-	if err != nil {
-		return fmt.Errorf("login: %w", err)
-	}
-	jwt := extractPlaudJWT(loginResp)
-	if jwt == "" {
-		return fmt.Errorf("login succeeded but no token found in response: %s", jsonSnippet(loginResp))
-	}
-	return storePlaudToken(jwt)
-}
-
-// extractPlaudJWT pulls the bearer JWT out of the /auth/login response,
-// tolerating envelope variation ({data:{...}} vs flat) and field naming.
-func extractPlaudJWT(resp map[string]any) string {
-	if t := firstString(resp, "access_token", "token", "jwt", "id_token", "auth_token"); t != "" {
-		return t
-	}
-	if data, ok := resp["data"].(map[string]any); ok {
-		return firstString(data, "access_token", "token", "jwt", "id_token", "auth_token")
-	}
-	return ""
 }
 
 // plaudConsoleSnippet copies the live Plaud session to the clipboard from any
@@ -319,7 +198,7 @@ func storePlaudToken(token string) error {
 	if !strings.HasPrefix(token, "eyJ") {
 		fmt.Println("Warning: token doesn't look like a JWT (expected to start with 'eyJ').")
 	}
-	// A bare token from --token / SMS has no refresh material; the backend will
+	// A bare token from --token has no refresh material; the backend will
 	// use it until it expires (24h for SSO workspace tokens). Decode the wid so
 	// the backend at least *could* refresh if a refresh token is added later.
 	return storePlaudCreds(map[string]string{
@@ -773,65 +652,4 @@ func printTokenExpiry(label, token, expiredMsg string) {
 	} else {
 		fmt.Printf("%s%s\n", label, expiredMsg)
 	}
-}
-
-// plaudPost issues a browser-shaped POST and decodes the JSON envelope. It
-// surfaces Plaud's negative-status envelope ({status:-N, msg:...}) as an error.
-func plaudPost(path string, body map[string]any) (map[string]any, error) {
-	buf, _ := json.Marshal(body)
-	req, err := http.NewRequest("POST", plaudAPIBase+path, bytes.NewReader(buf))
-	if err != nil {
-		return nil, err
-	}
-	for k, v := range plaudBrowserHeaders {
-		req.Header.Set(k, v)
-	}
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	var data map[string]any
-	if err := json.Unmarshal(raw, &data); err != nil {
-		return nil, fmt.Errorf("%s: non-JSON response (%s): %s", path, resp.Status, snippet(raw))
-	}
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("%s %s: %s", path, resp.Status, plaudErrMsg(data, raw))
-	}
-	if st, ok := data["status"].(float64); ok && st < 0 {
-		return nil, fmt.Errorf("%s status %d: %s", path, int(st), plaudErrMsg(data, raw))
-	}
-	return data, nil
-}
-
-func plaudErrMsg(data map[string]any, raw []byte) string {
-	if m := firstString(data, "msg", "message", "detail"); m != "" {
-		return m
-	}
-	return snippet(raw)
-}
-
-func firstString(m map[string]any, keys ...string) string {
-	for _, k := range keys {
-		if s, ok := m[k].(string); ok && s != "" {
-			return s
-		}
-	}
-	return ""
-}
-
-func snippet(raw []byte) string {
-	if len(raw) > 300 {
-		return string(raw[:300]) + "…"
-	}
-	return string(raw)
-}
-
-func jsonSnippet(v any) string {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return fmt.Sprintf("%v", v)
-	}
-	return snippet(b)
 }

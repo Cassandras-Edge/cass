@@ -1,10 +1,12 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 
+	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
 
 	"github.com/Cassandras-Edge/cass/internal/claudecfg"
@@ -34,8 +36,19 @@ Run with no args to list available service names.`,
 				return err
 			}
 			if len(args) == 0 {
-				printAddCatalog()
-				return nil
+				if !isInteractive() {
+					printAddCatalog()
+					return nil
+				}
+				picked, err := promptAddSelection(client, scope)
+				if err != nil {
+					return err
+				}
+				if len(picked) == 0 {
+					fmt.Println("Nothing selected.")
+					return nil
+				}
+				args = picked
 			}
 			return runAdd(args, client, scope, force)
 		},
@@ -121,6 +134,60 @@ func installedClaudeRegistryServices(scope string) []string {
 		}
 	}
 	return out
+}
+
+// promptAddSelection shows a multi-select of services NOT yet installed
+// for the resolved client(s) — nothing pre-checked, pick what you want
+// added. Already-installed services are hidden (this is `add`, not setup;
+// re-syncing existing entries is setup's job).
+func promptAddSelection(client, scope string) ([]string, error) {
+	clients, err := resolveClientsLenient(client)
+	if err != nil {
+		return nil, err
+	}
+	catalog := buildServiceCatalog(clients, scope)
+	available := make([]serviceCatalogEntry, 0, len(catalog))
+	nameWidth := 0
+	for _, e := range catalog {
+		if e.Installed {
+			continue
+		}
+		available = append(available, e)
+		if len(e.Name) > nameWidth {
+			nameWidth = len(e.Name)
+		}
+	}
+	if len(available) == 0 {
+		fmt.Println("All known services are already installed in this scope.")
+		return nil, nil
+	}
+
+	opts := make([]huh.Option[string], 0, len(available))
+	for _, e := range available {
+		var authMark string
+		if e.Authed {
+			authMark = authedStyle.Render("● authed")
+		} else {
+			authMark = noAuthStyle.Render("○ needs auth")
+		}
+		opts = append(opts, huh.NewOption(fmt.Sprintf("%-*s  %s   %s",
+			nameWidth, e.Name, dimStyle.Render(e.Description), authMark), e.Name))
+	}
+
+	var selected []string
+	form := huh.NewMultiSelect[string]().
+		Title("Add Cassandra services").
+		Description("Space to toggle, enter to confirm. Only services not yet installed are listed.").
+		Options(opts...).
+		Value(&selected).
+		Height(len(available) + 4)
+	if err := form.Run(); err != nil {
+		if errors.Is(err, huh.ErrUserAborted) {
+			return nil, fmt.Errorf("add aborted")
+		}
+		return nil, err
+	}
+	return selected, nil
 }
 
 func printAddCatalog() {

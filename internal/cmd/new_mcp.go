@@ -43,7 +43,7 @@ func newMcpCmd() *cobra.Command {
 		Use:   "new-mcp <name>",
 		Short: "Scaffold a new Cassandra MCP service repo",
 		Long: "Generates the standard per-repo files for a Cassandra MCP service\n" +
-			"(FastMCP + cassandra-mcp-auth + Woodpecker CI), modeled on cassandra-reddit-mcp.",
+			"(FastMCP + cassandra-kit + Woodpecker CI), modeled on cassandra-reddit-mcp.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			return runNewMcp(args[0], port, dir)

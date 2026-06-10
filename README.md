@@ -1,110 +1,93 @@
 # cass
 
-Cassandra platform CLI — auth, keys, cookies, and service management.
+> Go CLI for the Cassandra platform — auth, MCP keys, cookies, and client setup.
 
-## Install
+`cass` is the developer entrypoint to the Cassandra access plane. It authenticates a
+user against the portal (Google OAuth), provisions and refreshes per-service MCP keys,
+syncs browser cookies into the auth service, and wires those keys into Claude Code and
+Codex so the MCP services are reachable. The service catalog it installs from is the
+same set of cassandra-* MCP services that sit behind cassandra-kit's ACL enforcer.
 
-### macOS / Linux / WSL
+## Architecture
+
+Cobra + Charm CLI, single binary, built from `cmd/cass`. Layout:
+
+- `internal/cmd/` — one file per command (Cobra). `root.go` wires everything; `Version`
+  is injected via ldflags.
+- `internal/registry/` — the in-source service catalog. Each entry points at the GitHub
+  repo where that service's `cass-manifest.json` lives. `Name` must exactly match the
+  FastMCP server's `SERVICE_ID` and the portal's `MCP_SERVICES.id` (`/keys/validate` is
+  an exact-match lookup). Kept in source so `cass setup` works on a clean machine.
+- `internal/manifest/` — fetches/parses service manifests.
+- Support packages: `internal/auth`, `internal/portal`, `internal/config`,
+  `internal/browser`, `internal/share`, `internal/claudecfg`, `internal/shellrc`,
+  `internal/tui`.
+
+Deploy target: a standalone Go binary, cross-compiled and shipped as GitHub releases
+(Homebrew tap + Scoop bucket manifests live under `homebrew/` and `scoop/`). Not a k8s
+or ArgoCD workload.
+
+## Quickstart
 
 ```bash
-# With gh CLI (works with private repos)
-gh release download --repo Cassandras-Edge/cass --pattern 'cass-darwin-arm64' --dir ~/.local/bin
-mv ~/.local/bin/cass-darwin-arm64 ~/.local/bin/cass && chmod +x ~/.local/bin/cass
+# Build for the current host (version stamped from git describe → bin/cass)
+scripts/build.sh
 
-# Or use the install script (auto-detects platform)
+# Quick checks
+go build ./...
+go test ./...
+```
+
+Install a released build (macOS / Linux / WSL):
+
+```bash
 gh api repos/Cassandras-Edge/cass/contents/install.sh --jq '.content' | base64 -d | sh
 ```
 
-Installs to `~/.local/bin/cass`. Set `CASS_INSTALL_DIR` to change the location.
-
-Make sure `~/.local/bin` is in your PATH.
-
-### Windows (native, via scoop)
+Windows (native) via Scoop:
 
 ```powershell
 scoop bucket add cassandra https://github.com/Cassandras-Edge/cass
 scoop install cass
 ```
 
-`cass update` auto-detects scoop-managed installs and delegates to `scoop update cass`, so updates stay in sync with scoop's manifest ledger.
-
-> `cass claude setup` currently still requires WSL for the Claude Code integration. The `cass` binary itself (auth, keys, Codex setup) works on native Windows via scoop.
-
-#### Smart App Control blocks
-
-The `cass.exe` binary is unsigned. Windows 11's Smart App Control (on by default for clean installs) will refuse to run it with `An Application Control policy has blocked this file`. SAC operates below Defender, so `Unblock-File` and `Add-MpPreference -ExclusionPath` don't help — confirmed empirically.
-
-Fix: **Settings → Privacy & security → Windows Security → Smart App Control → Off.** Caveat from Microsoft: re-enabling SAC later requires a Windows reinstall. For technical users running custom CLI tooling this is usually an acceptable trade.
-
-Long-term fix is Authenticode signing in CI (Azure Trusted Signing is ~$10/mo). Revisit if more than one person needs cass on a SAC-enabled machine.
-
-## Setup
+Set up:
 
 ```bash
-cass login    # opens browser, authenticates via Google OAuth
-cass whoami   # verify your identity
-cass codex setup   # preferred Codex setup path
-cass claude setup  # preferred Claude setup path
+cass login                   # browser, Google OAuth via the portal
+cass whoami                  # verify identity
+cass setup --client both     # fetch manifests, mint per-service MCP keys, and
+                             # write mcpServers entries for Claude Code + Codex
 ```
 
-## Commands
+`cass setup` is idempotent — re-running it refreshes manifests and rotates keys.
+By default it also adds a managed `claude='cass claude'` / `codex='cass codex'`
+alias block to `~/.zshrc`, so `claude`/`codex` route through the wrapper (loads
+`.cass.toml` defaults + background MCP-key refresh).
 
-| Command | Description |
-|---------|-------------|
-| `cass login` | Authenticate with the Cassandra portal (one-time) |
-| `cass logout` | Clear cached authentication |
-| `cass whoami` | Show current identity |
-| `cass ensure-key SERVICE` | Ensure an MCP key exists for a service |
-| `cass cookies sync` | Sync YouTube cookies from Firefox to auth service |
-| `cass cookies test` | Test yt-dlp cookie extraction |
-| `cass keys create SERVICE NAME` | Create a new MCP key |
-| `cass keys validate KEY` | Validate an MCP key |
-| `cass keys delete KEY` | Delete an MCP key |
-| `cass refresh-keys` | Refresh Claude plugin MCP keys in `~/.claude/settings.json` |
-| `cass setup` | Set up Claude plugins and/or Codex MCP servers |
-| `cass codex setup` | Set up Codex MCP servers and Codex auth env wiring |
-| `cass claude setup` | Set up the Cassandra Claude marketplace plugins |
-| `cass codex <persona>` | Launch Codex with a named `.cass.toml` persona, if configured |
-| `cass update` | Update to the latest version |
+## Configuration
 
-## Auto-update
+| Var | Required | Purpose |
+|-----|----------|---------|
+| `CASS_PORTAL_URL` | No | Portal base URL (default `https://portal.cassandrasedge.com`) |
+| `AUTH_URL` | No | Auth-service base URL (default `https://auth.cassandrasedge.com`) |
+| `AUTH_SECRET` | No | Shared admin secret for direct auth-service writes (admin-only commands) |
+| `CASS_SHARE_URL` | No | Share-service base URL (default `https://share.cassandrasedge.com`) |
+| `TWITTER_MCP_URL` | No | twitter-mcp base URL for `cass twitter sync-queryids` (default `https://twitter-mcp.cassandrasedge.com`) |
+| `CASS_GMAIL_CLIENT_ID` / `CASS_GMAIL_CLIENT_SECRET` | No | Gmail OAuth client for `cass gmail link`; baked at build time or supplied at runtime |
+| `CASS_INSTALL_DIR` | No | install.sh target dir (default `~/.local/bin`) |
+| `CASS_DEV_EMAIL` | No | Dev override for the authenticated identity |
+| `CODEX_HOME` | No | Codex config dir used when wiring Codex MCP servers |
 
-`cass` checks for updates on every run (at most once per hour). Set `CASS_NO_AUTO_UPDATE=1` to disable.
+## Deployment
 
-## Claude Code + Codex
+Releases are cut with `scripts/release.sh vX.Y.Z` (cross-compiles all platforms, tags,
+and creates a GitHub release; `--dry` builds without tagging — requires a clean tree and
+authed `gh`). `.github/workflows/release.yml` runs the GitHub-side release on tag push.
+`cass update` auto-detects scoop-managed installs and delegates to `scoop update cass`.
 
-`cass` now supports both client flows:
+## Links
 
-- Claude Code: `cass claude setup` registers the Cassandra marketplace, installs plugins, and populates plugin MCP keys.
-- Codex: `cass codex setup` provisions Cassandra MCP keys, registers the remote MCP servers with `codex mcp add`, and writes bearer-token exports to `~/.config/cass/codex-mcp.env`.
-
-For Codex, source the generated env file before launching Codex so the configured `bearer_token_env_var` entries resolve correctly.
-
-## Per-project personas
-
-`cass claude` and `cass codex` are passthrough wrappers. They load the first
-`.cass.toml` found from the current directory upward, then prepend configured
-args/env before execing the real client.
-
-You can define explicit named personas under a client section:
-
-```toml
-[codex]
-args = ["--search"]
-
-[codex.personas.finance]
-args = ["--profile", "finance"]
-
-[codex.personas.finance.env]
-CASS_PERSONA = "finance"
-```
-
-Then:
-
-```bash
-cass codex finance
-cass codex finance "scan today's market setup"
-```
-
-Only declared persona names expand. If the first argument is not a configured
-persona, `cass codex ...` remains a normal passthrough invocation.
+- `internal/registry/registry.go` — the canonical list of services `cass` installs.
+- Related: cassandra-kit (auth/ACL/registry), cassandra-portal (key management + OAuth),
+  and the cassandra-* MCP services referenced in the registry.

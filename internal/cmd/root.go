@@ -35,7 +35,6 @@ func New() *cobra.Command {
 	root.AddCommand(clientCmd())
 	root.AddCommand(toolsCmd())
 	root.AddCommand(newMcpCmd())
-	root.AddCommand(titCmd())
 
 	registerAliases(root)
 	return root

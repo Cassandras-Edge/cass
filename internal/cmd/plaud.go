@@ -28,9 +28,12 @@ import (
 // account separate from the Google/Apple SSO login, so it returns an empty
 // account on this tenant). Sources, by durability:
 //
-//   - BROWSER (default) — lift the session from Chrome's localStorage (leveldb,
-//     plaintext) the same way `cass tradingview`/`cass perplexity` lift cookies.
-//     Plaud's web session is a TWO-token model:
+//   - BROWSER (default Chrome; --browser firefox|brave|edge) — lift the session
+//     from the browser's localStorage the same way `cass tradingview`/`cass
+//     perplexity` lift cookies. Chromium keeps it in leveldb (plaintext);
+//     modern Firefox keeps it in the per-origin LSNG store (storage/default/
+//     https+++web.plaud.ai/ls/data.sqlite, Snappy-compressed) — NOT the legacy
+//     webappsstore.sqlite. Plaud's web session is a TWO-token model:
 //     - workspace_token (the bearer used for /file/* calls) — ~24h life
 //     - refresh_token                                       — ~27d HARD ceiling
 //     We capture both + the workspaceId; the backend refreshes the 24h token
@@ -38,6 +41,8 @@ import (
 //     refresh/{wid}). After ~27d the refresh token expires and you re-run login.
 //   - --cookies — capture the long-lived pld_urt user-refresh cookie from
 //     Firefox (~10 months); the backend re-bootstraps the whole session from it.
+//     ONLY exists for the email/password login — Google/Apple SSO never sets
+//     pld_urt, so SSO accounts must use the browser/--paste paths instead.
 //   - --paste / --token — clipboard or a pasted bearer JWT, for any browser.
 //
 // The result lands in cassandra-auth under credentials/{email}/plaud-mcp =
@@ -76,7 +81,7 @@ func plaudLoginCmd() *cobra.Command {
 		RunE: func(_ *cobra.Command, _ []string) error {
 			switch {
 			case cookies:
-				return runPlaudCookieLogin()
+				return runPlaudCookieLogin(browser, profile)
 			case paste:
 				return runPlaudPasteLogin()
 			case pasteToken != "":
@@ -88,7 +93,7 @@ func plaudLoginCmd() *cobra.Command {
 	}
 	c.Flags().StringVar(&pasteToken, "token", "", "store a bearer JWT or a pasted workspaceList JSON blob")
 	c.Flags().BoolVar(&paste, "paste", false, "read the session JSON from your clipboard (see the devtools snippet this prints) — works in any browser, even private mode")
-	c.Flags().BoolVar(&cookies, "cookies", false, "capture the long-lived pld_urt cookie from Firefox (most durable, ~10 months)")
+	c.Flags().BoolVar(&cookies, "cookies", false, "capture the long-lived pld_urt cookie from the browser (Chrome/Firefox/Brave/Edge; most durable, ~10 months)")
 	c.Flags().StringVar(&browser, "browser", "chrome", "browser to read the session from (chrome|firefox|brave|edge|chromium)")
 	c.Flags().StringVar(&profile, "profile", "", "restrict to a browser profile by dir or display name (e.g. \"Profile 1\" or \"Plaud\") — use a dedicated profile so the backend owns the session")
 	return c
@@ -272,14 +277,21 @@ func fetchPlaudCreds() map[string]string {
 }
 
 // runPlaudCookieLogin captures the long-lived pld_urt user-refresh cookie from
-// Firefox (plaintext cookies.sqlite, same as the other cass cookie lifts). The
-// backend re-bootstraps the whole workspace session from it, so this is the
-// durable path — good for ~10 months instead of the workspace token's ~30 days.
-func runPlaudCookieLogin() error {
-	urt, exp := browser.ReadFirefoxCookie("%plaud.ai%", "pld_urt")
+// the browser. The backend re-bootstraps the whole workspace session from it,
+// so this is the durable path — good for ~10 months instead of the workspace
+// token's ~30 days. Firefox stores cookies in plaintext; Chromium browsers
+// AES-encrypt them (decrypted via the login Keychain). Contrary to the old
+// belief that SSO never sets pld_urt, Google/Apple SSO logins DO carry it on
+// `.plaud.ai` — it's just absent from Firefox if you logged in via Chrome.
+func runPlaudCookieLogin(browserName, profile string) error {
+	urt, exp, src := capturePlaudURT(browserName, profile)
 	if urt == "" {
-		return fmt.Errorf("no pld_urt cookie in Firefox — sign into web.plaud.ai in Firefox with normal " +
-			"(non-private) settings, reload the page once, then retry (or use --paste)")
+		// Fall back to telling the user where to sign in. SSO logins set pld_urt
+		// too (just on whichever browser holds the session), so the old
+		// "SSO never sets it" guard is gone.
+		return fmt.Errorf("no pld_urt cookie for .plaud.ai found in %s — sign into web.plaud.ai in that "+
+			"browser (normal, non-private window), reload once, then retry. Use --browser chrome|firefox|brave|edge "+
+			"to pick the browser, or `cass plaud login --paste` to capture from a live tab", browserName)
 	}
 	merged := fetchPlaudCreds()
 	merged["plaud_urt"] = urt
@@ -294,9 +306,49 @@ func runPlaudCookieLogin() error {
 		return fmt.Errorf("workspace id unknown — run `cass plaud login` (Chrome) once to capture it, then `cass plaud login --cookies`")
 	}
 	days := int(time.Until(time.Unix(exp, 0)).Hours() / 24)
-	fmt.Printf("Captured pld_urt cookie from Firefox (valid ~%dd). Backend now owns the session.\n", days)
-	fmt.Println("Tip: don't actively browse web.plaud.ai in this Firefox — it rotates the cookie out from under the backend.")
+	fmt.Printf("Captured pld_urt cookie from %s (valid ~%dd). Backend now owns the session.\n", src, days)
+	fmt.Printf("Tip: don't actively browse web.plaud.ai in this %s — it rotates the cookie out from under the backend.\n", src)
 	return storePlaudCreds(merged)
+}
+
+// capturePlaudURT reads the pld_urt cookie, preferring the requested browser and
+// falling back across the installed browsers. Returns (value, expiryUnix,
+// sourceBrowser). Firefox is plaintext; Chromium browsers are decrypted.
+func capturePlaudURT(browserName, profile string) (string, int64, string) {
+	type srcFn struct {
+		name string
+		read func() (string, int64)
+	}
+	chromium := func(b string) srcFn {
+		return srcFn{b, func() (string, int64) { return browser.ReadChromiumCookie(b, profile, "%plaud.ai%", "pld_urt") }}
+	}
+	firefox := srcFn{"firefox", func() (string, int64) { return browser.ReadFirefoxCookie("%plaud.ai%", "pld_urt") }}
+
+	// Try the explicitly requested browser first, then the rest.
+	order := []srcFn{}
+	if isFirefox(browserName) {
+		order = append(order, firefox)
+	} else if browserName != "" {
+		order = append(order, chromium(strings.ToLower(browserName)))
+	}
+	for _, s := range []srcFn{chromium("chrome"), firefox, chromium("brave"), chromium("edge"), chromium("chromium")} {
+		dup := false
+		for _, o := range order {
+			if o.name == s.name {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			order = append(order, s)
+		}
+	}
+	for _, s := range order {
+		if v, exp := s.read(); v != "" {
+			return v, exp, s.name
+		}
+	}
+	return "", 0, ""
 }
 
 // ── Browser (Chrome) session capture ───────────────────────────────────────
@@ -339,8 +391,17 @@ func runPlaudBrowserLogin(browser, profile string) error {
 // Plaud workspace session. It only READS the files (no DB open) so it works
 // while the browser is running and holding the file lock — Chromium keeps
 // localStorage in a leveldb (.ldb/.log), Firefox in webappsstore.sqlite(-wal).
-func findPlaudSession(browser, profile string) (plaudWSBlob, string, error) {
-	files, err := plaudSessionFiles(browser, profile)
+func findPlaudSession(browserName, profile string) (plaudWSBlob, string, error) {
+	// Firefox keeps web.plaud.ai localStorage in the modern per-origin LSNG
+	// store (storage/default/https+++web.plaud.ai/ls/data.sqlite) with
+	// Snappy-compressed values — the legacy webappsstore.sqlite is empty for
+	// these origins, so a raw byte scan finds nothing. Read LSNG directly first.
+	if isFirefox(browserName) {
+		if blob, src, ok := findPlaudFirefoxLSNG(profile); ok {
+			return blob, src, nil
+		}
+	}
+	files, err := plaudSessionFiles(browserName, profile)
 	if err != nil {
 		return plaudWSBlob{}, "", err
 	}
@@ -369,14 +430,65 @@ func findPlaudSession(browser, profile string) (plaudWSBlob, string, error) {
 	}
 	if bestSrc == "" {
 		if scanned == 0 {
-			if profile != "" && !isFirefox(browser) {
-				return plaudWSBlob{}, "", fmt.Errorf("no %s profile matching %q — available: %s", browser, profile, strings.Join(chromiumProfileNames(browser), ", "))
+			if profile != "" && !isFirefox(browserName) {
+				return plaudWSBlob{}, "", fmt.Errorf("no %s profile matching %q — available: %s", browserName, profile, strings.Join(chromiumProfileNames(browserName), ", "))
 			}
-			return plaudWSBlob{}, "", fmt.Errorf("no %s profile/localStorage found — is %s installed? (try --browser firefox|brave|edge, or --token)", browser, browser)
+			return plaudWSBlob{}, "", fmt.Errorf("no %s profile/localStorage found — is %s installed? (try --browser firefox|brave|edge, or --token)", browserName, browserName)
 		}
-		return plaudWSBlob{}, "", fmt.Errorf("no Plaud session found in %s — sign in at web.plaud.ai in that browser, then retry (or use --token)", browser)
+		return plaudWSBlob{}, "", fmt.Errorf("no Plaud session found in %s — sign in at web.plaud.ai in that browser, then retry (or use --token)", browserName)
 	}
 	return best, bestSrc, nil
+}
+
+// plaudFirefoxOriginDir is the escaped origin directory Firefox uses for the
+// web.plaud.ai LSNG localStorage store.
+const plaudFirefoxOriginDir = "https+++web.plaud.ai"
+
+// plaudFirefoxLoginMethod returns the `pld_loginMethod` value (e.g. "google",
+// "apple", "email") from Firefox's web.plaud.ai localStorage, or "" if unknown.
+func plaudFirefoxLoginMethod(profile string) string {
+	stores, err := browser.ReadFirefoxLSNG(plaudFirefoxOriginDir, profile)
+	if err != nil {
+		return ""
+	}
+	for _, st := range stores {
+		if v, ok := st.Values["pld_loginMethod"]; ok {
+			// Stored as a JSON string literal, e.g. "google".
+			return strings.Trim(strings.TrimSpace(v), `"`)
+		}
+	}
+	return ""
+}
+
+// findPlaudFirefoxLSNG pulls the freshest Plaud workspace session out of
+// Firefox's modern LSNG localStorage. The web app stores it under the
+// `<userId>:workspaceList` key (a JSON array of workspace objects, each with
+// workspaceToken + refreshToken). Returns ok=false if no usable session exists.
+func findPlaudFirefoxLSNG(profile string) (plaudWSBlob, string, bool) {
+	stores, err := browser.ReadFirefoxLSNG(plaudFirefoxOriginDir, profile)
+	if err != nil {
+		return plaudWSBlob{}, "", false
+	}
+	var best plaudWSBlob
+	var bestSrc string
+	for _, st := range stores {
+		for k, v := range st.Values {
+			if !strings.HasSuffix(k, ":workspaceList") {
+				continue
+			}
+			blob, perr := parsePlaudSessionBlob(v)
+			if perr != nil {
+				continue
+			}
+			if blob.WorkspaceToken != "" && blob.ExpiresAt >= best.ExpiresAt {
+				best, bestSrc = blob, st.Path
+			}
+		}
+	}
+	if bestSrc == "" {
+		return plaudWSBlob{}, "", false
+	}
+	return best, bestSrc, true
 }
 
 func isFirefox(browser string) bool { return strings.ToLower(browser) == "firefox" }
@@ -441,7 +553,11 @@ func firefoxLocalStorageFiles(profile string) ([]string, error) {
 // path for display (depth differs between Chromium and Firefox layouts).
 func sessionProfileName(browser, src string) string {
 	if isFirefox(browser) {
-		// .../Profiles/<profile>/webappsstore.sqlite
+		// LSNG: .../Profiles/<profile>/storage/default/<origin>/ls/data.sqlite
+		if i := strings.Index(src, string(filepath.Separator)+"storage"+string(filepath.Separator)); i >= 0 {
+			return filepath.Base(src[:i])
+		}
+		// Legacy: .../Profiles/<profile>/webappsstore.sqlite
 		return filepath.Base(filepath.Dir(src))
 	}
 	// .../<profile>/Local Storage/leveldb/<file>
@@ -638,6 +754,9 @@ func runPlaudStatus() error {
 		printTokenExpiry("  refresh token:  ", rt, "EXPIRED — run `cass plaud login` to re-capture")
 	} else {
 		fmt.Println("  refresh token:  none — token won't auto-renew; re-link with `cass plaud login`")
+	}
+	if urt, ok := raw["plaud_urt"].(string); ok && urt != "" {
+		printTokenExpiry("  pld_urt cookie: ", urt, "EXPIRED — re-run `cass plaud login --cookies`")
 	}
 	return nil
 }

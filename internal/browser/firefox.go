@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/golang/snappy"
 	_ "modernc.org/sqlite"
 )
 
@@ -263,6 +264,116 @@ func HasFirefoxCookies(domains []string, requiredNames []string) bool {
 		return false
 	}
 	return n > 0
+}
+
+// LSNGStore is one Firefox LocalStorage Next-Gen (LSNG) origin store, read from
+// a profile's storage/default/<origin>/ls/data.sqlite. Values are decompressed.
+type LSNGStore struct {
+	Profile string            // profile directory name (e.g. "jr3v8x3r.default-release")
+	Path    string            // the data.sqlite path
+	Values  map[string]string // localStorage key -> value (Snappy-decompressed)
+}
+
+// ReadFirefoxLSNG reads localStorage for `originDir` (Firefox's escaped origin
+// directory name, e.g. "https+++web.plaud.ai") across every Firefox profile,
+// optionally filtered by a profile-name substring. Modern Firefox keeps
+// localStorage in the per-origin LSNG store (storage/default/<origin>/ls/
+// data.sqlite) — NOT the legacy webappsstore.sqlite — and Snappy-compresses
+// values whose compression_type == 1. Returns one LSNGStore per profile that
+// has the origin.
+func ReadFirefoxLSNG(originDir, profileFilter string) ([]LSNGStore, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+	var base string
+	switch runtime.GOOS {
+	case "darwin":
+		base = filepath.Join(home, "Library", "Application Support", "Firefox", "Profiles")
+	case "linux":
+		base = filepath.Join(home, ".mozilla", "firefox")
+	case "windows":
+		base = filepath.Join(os.Getenv("APPDATA"), "Mozilla", "Firefox", "Profiles")
+	default:
+		return nil, fmt.Errorf("unsupported OS for Firefox LSNG: %s", runtime.GOOS)
+	}
+	profiles, _ := os.ReadDir(base)
+	var stores []LSNGStore
+	for _, p := range profiles {
+		if !p.IsDir() {
+			continue
+		}
+		if profileFilter != "" && !strings.Contains(strings.ToLower(p.Name()), strings.ToLower(profileFilter)) {
+			continue
+		}
+		src := filepath.Join(base, p.Name(), "storage", "default", originDir, "ls", "data.sqlite")
+		if _, err := os.Stat(src); err != nil {
+			continue
+		}
+		vals, err := readLSNGFile(src)
+		if err != nil || len(vals) == 0 {
+			continue
+		}
+		stores = append(stores, LSNGStore{Profile: p.Name(), Path: src, Values: vals})
+	}
+	return stores, nil
+}
+
+// readLSNGFile opens a copy of a LSNG data.sqlite and returns its decompressed
+// key/value pairs. compression_type == 1 means the value is Snappy block-format
+// compressed (same as yt-dlp / Firefox source); 0 is stored verbatim.
+func readLSNGFile(src string) (map[string]string, error) {
+	tmp, err := os.CreateTemp("", "cass-fox-ls-*.sqlite")
+	if err != nil {
+		return nil, err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	sf, err := os.Open(src)
+	if err != nil {
+		tmp.Close()
+		return nil, err
+	}
+	if _, err := io.Copy(tmp, sf); err != nil {
+		sf.Close()
+		tmp.Close()
+		return nil, err
+	}
+	sf.Close()
+	tmp.Close()
+	db, err := sql.Open("sqlite", tmpPath+"?mode=ro")
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	rows, err := db.Query("SELECT key, compression_type, value FROM data")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var (
+			key      string
+			compType int
+			value    []byte
+		)
+		if err := rows.Scan(&key, &compType, &value); err != nil {
+			return nil, err
+		}
+		if compType == 1 {
+			dec, err := snappy.Decode(nil, value)
+			if err != nil {
+				continue // skip anything we can't decompress rather than failing the whole read
+			}
+			value = dec
+		}
+		out[key] = string(value)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // ReadFirefoxCookie returns (value, expiryUnix) for the first cookie matching

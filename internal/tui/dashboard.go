@@ -37,8 +37,22 @@ type section struct {
 	items []item
 }
 
-var sections = []section{
-	{
+// LinkAccount is one row of the LINK ACCOUNTS menu. cmd.New() injects these via
+// SetLinkAccounts from the single link-account table in root.go, so adding an
+// account there populates both the CLI and this interactive menu — no second edit.
+type LinkAccount struct {
+	Label string
+	Args  []string // command path the row execs
+	Svc   string   // badge probe service id ("" = no badge)
+}
+
+var linkAccounts []LinkAccount
+
+// SetLinkAccounts is called once at startup (before Run) by the cmd package.
+func SetLinkAccounts(a []LinkAccount) { linkAccounts = a }
+
+var (
+	sectionAuth = section{
 		title: "AUTH",
 		items: []item{
 			{label: "whoami", args: []string{"auth", "whoami"}},
@@ -46,21 +60,8 @@ var sections = []section{
 			{label: "logout", args: []string{"auth", "logout"}},
 			{label: "devices", args: []string{"auth", "devices", "list"}},
 		},
-	},
-	{
-		title: "LINK ACCOUNTS",
-		items: []item{
-			{label: "gmail", args: []string{"link", "gmail", "link"}, svc: "gmail-mcp"},
-			{label: "plaud", args: []string{"link", "plaud", "login"}, svc: "plaud-mcp"},
-			{label: "discord", args: []string{"link", "discord", "login"}, svc: "discord-mcp"},
-			{label: "twitter", args: []string{"link", "twitter", "sync-queryids"}, svc: "twitter-mcp"},
-			{label: "youtube", args: []string{"youtube", "link"}, svc: "yt-mcp"},
-			{label: "tradingview", args: []string{"link", "tradingview", "setup"}, svc: "tradingview-mcp"},
-			{label: "schwab", args: []string{"link", "schwab"}, svc: "schwab-mcp"},
-			{label: "cookies", args: []string{"link", "cookies", "sync"}},
-		},
-	},
-	{
+	}
+	sectionClients = section{
 		title: "CLIENTS",
 		items: []item{
 			{label: "setup", args: []string{"client", "setup"}},
@@ -69,14 +70,23 @@ var sections = []section{
 			{label: "flock", args: []string{"client", "flock"}},
 			{label: "config", args: []string{"client", "config", "show"}},
 		},
-	},
-	{
+	}
+	sectionTools = section{
 		title: "TOOLS",
 		items: []item{
 			{label: "share", args: []string{"tools", "share", "list"}},
 			{label: "update", args: []string{"tools", "update"}},
 		},
-	},
+	}
+)
+
+// sections assembles the menu, building LINK ACCOUNTS from the injected table.
+func sections() []section {
+	link := section{title: "LINK ACCOUNTS"}
+	for _, la := range linkAccounts {
+		link.items = append(link.items, item{label: la.Label, args: la.Args, svc: la.Svc})
+	}
+	return []section{sectionAuth, link, sectionClients, sectionTools}
 }
 
 var (
@@ -242,7 +252,7 @@ func (m model) View() string {
 func (m *model) rebuild() {
 	f := strings.ToLower(strings.TrimSpace(m.filter))
 	var rows []row
-	for _, sec := range sections {
+	for _, sec := range sections() {
 		var matched []item
 		for _, it := range sec.items {
 			if f == "" || strings.Contains(strings.ToLower(it.label), f) {
@@ -355,8 +365,14 @@ func probeBadges(creds auth.DeviceCreds, authErr error) map[string]bool {
 		return out
 	}
 
-	// Only link-account services with a cheap per-service credentials lookup.
-	svcs := []string{"gmail-mcp", "plaud-mcp", "discord-mcp", "twitter-mcp", "yt-mcp", "tradingview-mcp", "schwab-mcp"}
+	// Only link-account services with a cheap per-service credentials lookup —
+	// derived from the same injected table that builds the menu.
+	var svcs []string
+	for _, la := range linkAccounts {
+		if la.Svc != "" {
+			svcs = append(svcs, la.Svc)
+		}
+	}
 
 	deadline := 1500 * time.Millisecond
 	client := &http.Client{Timeout: deadline}

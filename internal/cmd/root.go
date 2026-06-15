@@ -26,6 +26,8 @@ func New() *cobra.Command {
 		SilenceUsage: true,
 	}
 
+	tui.SetLinkAccounts(tuiLinkAccounts())
+
 	// The CLI does four jobs; each is a command namespace. A fifth group
 	// (tools) holds device-local utilities. Old flat invocations survive
 	// via hidden top-level aliases registered at the bottom.
@@ -78,6 +80,30 @@ func keysGroupCmd() *cobra.Command {
 	return cmd
 }
 
+// linkAccount is the single source of truth for an external-account link: its
+// cobra command, optional top-level alias, the badge-probe service id, and how
+// it appears in the interactive dashboard. Add one row here and it shows up in
+// the `cass link` CLI group, the top-level aliases, AND the TUI menu — no
+// second edit in the tui package.
+type linkAccount struct {
+	new       func() *cobra.Command
+	alias     string   // top-level alias; "" = none (e.g. schwab is link-only)
+	menuLabel string   // dashboard row label; "" = hidden from the menu
+	menuArgs  []string // command path the dashboard execs
+	svc       string   // badge probe service id; "" = no badge
+}
+
+var linkAccounts = []linkAccount{
+	{gmailCmd, "gmail", "gmail", []string{"link", "gmail", "link"}, "gmail-mcp"},
+	{plaudCmd, "plaud", "plaud", []string{"link", "plaud", "login"}, "plaud-mcp"},
+	{discordCmd, "discord", "discord", []string{"link", "discord", "login"}, "discord-mcp"},
+	{twitterCmd, "twitter", "twitter", []string{"link", "twitter", "sync-queryids"}, "twitter-mcp"},
+	{youtubeCmd, "youtube", "youtube", []string{"youtube", "link"}, "yt-mcp"},
+	{tradingViewCmd, "tradingview", "tradingview", []string{"link", "tradingview", "setup"}, "tradingview-mcp"},
+	{authSchwabCmd, "", "schwab", []string{"link", "schwab"}, "schwab-mcp"},
+	{cookiesCmd, "cookies", "cookies", []string{"link", "cookies", "sync"}, ""},
+}
+
 // linkCmd — job 3: link external accounts so the fleet can act on them.
 // Every Cassandra service authenticates with an mcp_key bearer; these
 // subcommands provision the per-account upstream credentials (cookies,
@@ -87,15 +113,22 @@ func linkCmd() *cobra.Command {
 		Use:   "link",
 		Short: "Link external accounts (Gmail, Plaud, Discord, Twitter, YouTube, TradingView, Schwab, cookies)",
 	}
-	cmd.AddCommand(gmailCmd())
-	cmd.AddCommand(plaudCmd())
-	cmd.AddCommand(discordCmd())
-	cmd.AddCommand(twitterCmd())
-	cmd.AddCommand(youtubeCmd())
-	cmd.AddCommand(tradingViewCmd())
-	cmd.AddCommand(cookiesCmd())
-	cmd.AddCommand(authSchwabCmd())
+	for _, la := range linkAccounts {
+		cmd.AddCommand(la.new())
+	}
 	return cmd
+}
+
+// tuiLinkAccounts projects the link-account table into the dashboard menu rows.
+func tuiLinkAccounts() []tui.LinkAccount {
+	var out []tui.LinkAccount
+	for _, la := range linkAccounts {
+		if la.menuLabel == "" {
+			continue
+		}
+		out = append(out, tui.LinkAccount{Label: la.menuLabel, Args: la.menuArgs, Svc: la.svc})
+	}
+	return out
 }
 
 // clientCmd — job 4: wire local AI clients (Claude Code, Codex, flock) to
@@ -150,14 +183,12 @@ func registerAliases(root *cobra.Command) {
 	root.AddCommand(alias("ensure-key", ensureKeyCmd))
 	root.AddCommand(alias("refresh-keys", refreshKeysCmd))
 
-	// link group
-	root.AddCommand(alias("gmail", gmailCmd))
-	root.AddCommand(alias("plaud", plaudCmd))
-	root.AddCommand(alias("discord", discordCmd))
-	root.AddCommand(alias("twitter", twitterCmd))
-	root.AddCommand(alias("youtube", youtubeCmd))
-	root.AddCommand(alias("tradingview", tradingViewCmd))
-	root.AddCommand(alias("cookies", cookiesCmd))
+	// link group — driven by the linkAccounts table (schwab has no alias).
+	for _, la := range linkAccounts {
+		if la.alias != "" {
+			root.AddCommand(alias(la.alias, la.new))
+		}
+	}
 
 	// client group
 	root.AddCommand(alias("setup", setupCmd))

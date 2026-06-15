@@ -85,12 +85,13 @@ func keysGroupCmd() *cobra.Command {
 func linkCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "link",
-		Short: "Link external accounts (Gmail, Plaud, Discord, Twitter, TradingView, Schwab, cookies)",
+		Short: "Link external accounts (Gmail, Plaud, Discord, Twitter, YouTube, TradingView, Schwab, cookies)",
 	}
 	cmd.AddCommand(gmailCmd())
 	cmd.AddCommand(plaudCmd())
 	cmd.AddCommand(discordCmd())
 	cmd.AddCommand(twitterCmd())
+	cmd.AddCommand(youtubeCmd())
 	cmd.AddCommand(tradingViewCmd())
 	cmd.AddCommand(cookiesCmd())
 	cmd.AddCommand(authSchwabCmd())
@@ -154,6 +155,7 @@ func registerAliases(root *cobra.Command) {
 	root.AddCommand(alias("plaud", plaudCmd))
 	root.AddCommand(alias("discord", discordCmd))
 	root.AddCommand(alias("twitter", twitterCmd))
+	root.AddCommand(alias("youtube", youtubeCmd))
 	root.AddCommand(alias("tradingview", tradingViewCmd))
 	root.AddCommand(alias("cookies", cookiesCmd))
 

@@ -755,9 +755,6 @@ func runPlaudStatus() error {
 	} else {
 		fmt.Println("  refresh token:  none — token won't auto-renew; re-link with `cass plaud login`")
 	}
-	if urt, ok := raw["plaud_urt"].(string); ok && urt != "" {
-		printTokenExpiry("  pld_urt cookie: ", urt, "EXPIRED — re-run `cass plaud login --cookies`")
-	}
 	return nil
 }
 

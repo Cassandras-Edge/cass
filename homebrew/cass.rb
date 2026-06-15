@@ -2,19 +2,19 @@ class Cass < Formula
   desc "Cassandra platform CLI — auth, MCP keys, cookies, codex/claude setup"
   homepage "https://github.com/Cassandras-Edge/cass"
   license "Proprietary"
-  version "0.10.3" # bump-homebrew: VERSION
+  version "0.10.4" # bump-homebrew: VERSION
 
   on_macos do
     if Hardware::CPU.arm?
       url "https://github.com/Cassandras-Edge/cass/releases/download/v#{version}/cass-darwin-arm64"
-      sha256 "beda67cd705e8f1a1fc88c2cede0cd53ef2be833b883eee86862560cef803c61" # bump-homebrew: SHA_DARWIN_ARM64
+      sha256 "baf8d186e6b639baa214e9e001d04ffec0fcb6411d7f0c600c5faa83dd8f5501" # bump-homebrew: SHA_DARWIN_ARM64
 
       def install
         bin.install "cass-darwin-arm64" => "cass"
       end
     else
       url "https://github.com/Cassandras-Edge/cass/releases/download/v#{version}/cass-darwin-amd64"
-      sha256 "7f6a3364bfb6e2165b9d19416dbe6e1c2f088db7ba4e4d1077af807be19a432c" # bump-homebrew: SHA_DARWIN_AMD64
+      sha256 "8bab647c8fc828203599595a95a19416cab309bab50a455ea518181de6bc1c9c" # bump-homebrew: SHA_DARWIN_AMD64
 
       def install
         bin.install "cass-darwin-amd64" => "cass"
@@ -25,14 +25,14 @@ class Cass < Formula
   on_linux do
     if Hardware::CPU.arm?
       url "https://github.com/Cassandras-Edge/cass/releases/download/v#{version}/cass-linux-arm64"
-      sha256 "ba32b2e1d3197eedc356381182cb62e09ce8d2a10450b59c3e61df5d18f30d3f" # bump-homebrew: SHA_LINUX_ARM64
+      sha256 "cc70f30105a2a242435954a78ead369820563f26420336c6b50beb361ef045eb" # bump-homebrew: SHA_LINUX_ARM64
 
       def install
         bin.install "cass-linux-arm64" => "cass"
       end
     else
       url "https://github.com/Cassandras-Edge/cass/releases/download/v#{version}/cass-linux-amd64"
-      sha256 "d7a378c3e6576a44418d3e9cc7c6a9291c84d4fea726a716d54f83afb296447a" # bump-homebrew: SHA_LINUX_AMD64
+      sha256 "2ddf3c74bd6afcfc2f46e65aa6f6e2ed1e28de302356835b2122be3e9f13a1bb" # bump-homebrew: SHA_LINUX_AMD64
 
       def install
         bin.install "cass-linux-amd64" => "cass"

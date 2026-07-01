@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -531,7 +532,7 @@ func ensureDeviceAuthorized(deviceName string, forceReauth bool) error {
 		deviceName = host
 	}
 	fmt.Printf("  authorizing device '%s'...\n", deviceName)
-	return runLogin(nil, deviceName)
+	return runLogin(context.Background(), deviceName)
 }
 
 func expiringSoon(expiresAt string) bool {

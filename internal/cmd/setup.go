@@ -101,7 +101,7 @@ Re-running setup is the canonical way to refresh manifests + rotate keys.`,
 	cmd.Flags().StringSliceVar(&includes, "with", nil, "Enable an optional service (repeatable, comma-separated, or 'all'). Skips the interactive picker.")
 	cmd.Flags().StringVar(&opts.deviceName, "device", "", "Device name to register (default: prompt with hostname)")
 	cmd.Flags().BoolVar(&opts.reauth, "reauth", false, "Force a fresh device login even if creds look valid")
-	cmd.Flags().BoolVar(&opts.paste, "paste", false, "Headless device login: paste the redirect URL instead of relying on the localhost callback")
+	cmd.Flags().BoolVar(&opts.paste, "paste", false, "Device login: paste the redirect URL instead of relying on the localhost callback (auto-enabled on headless hosts)")
 	cmd.Flags().BoolVarP(&nonInteractive, "non-interactive", "y", false, "Don't prompt — use flag values as-is")
 	cmd.Flags().BoolVar(&opts.installAutoHook, "auto-hook", true, "Install SessionStart hook that auto-rotates near-expiry MCP keys")
 	cmd.Flags().BoolVar(&opts.installShellRebind, "shell-rebind", true, "Add alias claude='cass claude' and codex='cass codex' to ~/.zshrc (managed block)")

@@ -31,7 +31,7 @@ func loginCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&device, "device", "", "device name (defaults to hostname)")
-	cmd.Flags().BoolVar(&paste, "paste", false, "Headless mode: paste the redirect URL back into the terminal instead of relying on the localhost callback")
+	cmd.Flags().BoolVar(&paste, "paste", false, "Paste the redirect URL back into the terminal instead of relying on the localhost callback (auto-enabled on headless hosts)")
 	return cmd
 }
 
@@ -86,6 +86,20 @@ func runLogin(ctx context.Context, device string, paste bool) error {
 	fmt.Printf("Opening browser for login (device: %s)...\n", device)
 	fmt.Printf("If it doesn't open, visit: %s\n", loginURL)
 	openBrowser(loginURL)
+
+	// Auto-detect a headless host: with no local display the browser's redirect
+	// to localhost can't come back here, so the callback would hang forever.
+	// Switch to paste mode automatically (only when we have a TTY to read from).
+	if !paste && isHeadless() {
+		if !term.IsTerminal(int(os.Stdin.Fd())) {
+			// Callback can't come back and there's no terminal to paste into —
+			// fail fast instead of blocking on a callback that will never arrive.
+			return errors.New("no local display and stdin is not a terminal — re-run interactively with --paste")
+		}
+		fmt.Println("\nNo local display detected — the browser can't redirect back to this host.")
+		fmt.Println("Switching to paste mode.")
+		paste = true
+	}
 
 	// In paste mode the browser's redirect to localhost can't reach this host
 	// (headless box, remote browser). Read the redirect URL directly from the
@@ -185,6 +199,16 @@ func persistLogin(p url.Values, device string) error {
 	}
 	fmt.Printf("Logged in as %s\n", creds.Email)
 	return nil
+}
+
+// isHeadless reports whether this host has no local display for the browser to
+// redirect back to — a Linux box with no X11/Wayland session, which is the
+// usual case over SSH. macOS and Windows are assumed to always have a GUI.
+func isHeadless() bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	return os.Getenv("DISPLAY") == "" && os.Getenv("WAYLAND_DISPLAY") == ""
 }
 
 func openBrowser(u string) {

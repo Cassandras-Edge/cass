@@ -101,6 +101,7 @@ Re-running setup is the canonical way to refresh manifests + rotate keys.`,
 	cmd.Flags().StringSliceVar(&includes, "with", nil, "Enable an optional service (repeatable, comma-separated, or 'all'). Skips the interactive picker.")
 	cmd.Flags().StringVar(&opts.deviceName, "device", "", "Device name to register (default: prompt with hostname)")
 	cmd.Flags().BoolVar(&opts.reauth, "reauth", false, "Force a fresh device login even if creds look valid")
+	cmd.Flags().BoolVar(&opts.paste, "paste", false, "Headless device login: paste the redirect URL instead of relying on the localhost callback")
 	cmd.Flags().BoolVarP(&nonInteractive, "non-interactive", "y", false, "Don't prompt — use flag values as-is")
 	cmd.Flags().BoolVar(&opts.installAutoHook, "auto-hook", true, "Install SessionStart hook that auto-rotates near-expiry MCP keys")
 	cmd.Flags().BoolVar(&opts.installShellRebind, "shell-rebind", true, "Add alias claude='cass claude' and codex='cass codex' to ~/.zshrc (managed block)")
@@ -116,6 +117,7 @@ type setupOptions struct {
 	deviceName         string
 	includes           []string // --with values; non-empty skips interactive
 	reauth             bool
+	paste              bool
 	nonInteractive     bool
 	installAutoHook    bool
 	installShellRebind bool
@@ -123,7 +125,7 @@ type setupOptions struct {
 
 func runSetup(opts setupOptions) error {
 	fmt.Println("Checking device authorization...")
-	if err := ensureDeviceAuthorized(opts.deviceName, opts.reauth); err != nil {
+	if err := ensureDeviceAuthorized(opts.deviceName, opts.reauth, opts.paste); err != nil {
 		return err
 	}
 
@@ -500,7 +502,7 @@ func resolveOptIns(includes, optionalPool, knownPool []string) []string {
 // within 7 days of expiry keeps users from ever hitting "stale creds" mid-flow.
 const expiryWarnDays = 7
 
-func ensureDeviceAuthorized(deviceName string, forceReauth bool) error {
+func ensureDeviceAuthorized(deviceName string, forceReauth, paste bool) error {
 	creds, err := auth.Read()
 	needsLogin := forceReauth || err != nil || creds.MCPKey == ""
 
@@ -532,7 +534,7 @@ func ensureDeviceAuthorized(deviceName string, forceReauth bool) error {
 		deviceName = host
 	}
 	fmt.Printf("  authorizing device '%s'...\n", deviceName)
-	return runLogin(context.Background(), deviceName)
+	return runLogin(context.Background(), deviceName, paste)
 }
 
 func expiringSoon(expiresAt string) bool {

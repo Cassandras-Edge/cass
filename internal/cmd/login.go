@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/Cassandras-Edge/cass/internal/auth"
 	"github.com/Cassandras-Edge/cass/internal/config"
@@ -21,18 +22,20 @@ import (
 
 func loginCmd() *cobra.Command {
 	var device string
+	var paste bool
 	cmd := &cobra.Command{
 		Use:   "login",
 		Short: "Authenticate with the Cassandra portal via browser",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runLogin(cmd.Context(), device)
+			return runLogin(cmd.Context(), device, paste)
 		},
 	}
 	cmd.Flags().StringVar(&device, "device", "", "device name (defaults to hostname)")
+	cmd.Flags().BoolVar(&paste, "paste", false, "Headless mode: paste the redirect URL back into the terminal instead of relying on the localhost callback")
 	return cmd
 }
 
-func runLogin(ctx context.Context, device string) error {
+func runLogin(ctx context.Context, device string, paste bool) error {
 	if device == "" {
 		host, _ := os.Hostname()
 		host, _, _ = strings.Cut(host, ".")
@@ -84,6 +87,19 @@ func runLogin(ctx context.Context, device string) error {
 	fmt.Printf("If it doesn't open, visit: %s\n", loginURL)
 	openBrowser(loginURL)
 
+	// In paste mode the browser's redirect to localhost can't reach this host
+	// (headless box, remote browser). Read the redirect URL directly from the
+	// terminal instead of waiting on the HTTP callback. This is synchronous on
+	// the main goroutine — no background stdin reader to leak or to race the
+	// interactive setup form for stdin.
+	if paste {
+		params, err := readPastedCallback()
+		if err != nil {
+			return err
+		}
+		return persistLogin(params, device)
+	}
+
 	select {
 	case params := <-resultCh:
 		return persistLogin(params, device)
@@ -94,6 +110,52 @@ func runLogin(ctx context.Context, device string) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// readPastedCallback prompts for and reads a pasted redirect URL (or bare query
+// string) from the terminal, with echo suppressed so the key/cf_client_secret
+// it carries don't land in terminal scrollback or logs. Requires an interactive
+// terminal — paste mode is meaningless without one.
+func readPastedCallback() (url.Values, error) {
+	fd := int(os.Stdin.Fd())
+	if !term.IsTerminal(fd) {
+		return nil, errors.New("--paste needs an interactive terminal to read the pasted redirect URL")
+	}
+	fmt.Println()
+	fmt.Println("Headless paste mode — after authenticating in the browser, copy the full")
+	fmt.Println("redirect URL (starts with http://localhost:...) and paste it below.")
+	fmt.Print("Redirect URL (input hidden): ")
+
+	raw, err := term.ReadPassword(fd)
+	fmt.Println()
+	if err != nil {
+		return nil, fmt.Errorf("read pasted callback: %w", err)
+	}
+	return parseCallbackInput(string(raw))
+}
+
+// parseCallbackInput accepts either a full redirect URL
+// (http://localhost:PORT/callback?key=...&email=...) or just its query string
+// and returns the parsed values, validating that key and email are present.
+func parseCallbackInput(s string) (url.Values, error) {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "?")
+	if s == "" {
+		return nil, errors.New("no callback URL pasted")
+	}
+	// If it parses as a URL with a query, use that; otherwise treat the whole
+	// string as a bare query (user pasted only key=...&email=...).
+	if u, perr := url.Parse(s); perr == nil && u.RawQuery != "" {
+		s = u.RawQuery
+	}
+	vals, err := url.ParseQuery(s)
+	if err != nil {
+		return nil, fmt.Errorf("could not parse pasted callback: %w", err)
+	}
+	if vals.Get("key") == "" || vals.Get("email") == "" {
+		return nil, errors.New("pasted callback missing key/email — copy the full localhost URL from the browser after authenticating")
+	}
+	return vals, nil
 }
 
 func persistLogin(p url.Values, device string) error {

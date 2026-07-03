@@ -14,11 +14,15 @@ package claudecfg
 //
 //   <cwd>/.mcp.json                              ← Claude's "project"
 //                                                  scope, designed to be
-//                                                  committed to git. Not
-//                                                  written by cass today
-//                                                  because inline bearer
-//                                                  tokens shouldn't be
-//                                                  team-shared.
+//                                                  committed to git. cass
+//                                                  never creates these, but
+//                                                  refresh-keys rewrites
+//                                                  Authorization headers in
+//                                                  ones that already exist
+//                                                  (across every project
+//                                                  dir Claude knows about),
+//                                                  so a hand-placed file
+//                                                  doesn't go stale.
 //
 // This file owns just the ~/.claude.json side. It's surgical — only
 // touches the two map keys above, preserving every other field in the
@@ -224,6 +228,18 @@ func (s *MCPStore) MCPEntry(scope Scope, name string) (MCPServerSpec, bool, erro
 		}
 	}
 	return spec, true, nil
+}
+
+// ProjectDirs returns every project directory Claude Code has recorded
+// in ~/.claude.json (.projects keys). Used by refresh-keys to find
+// project-level .mcp.json files beyond the cwd.
+func (s *MCPStore) ProjectDirs() []string {
+	projects, _ := s.doc["projects"].(map[string]any)
+	out := make([]string, 0, len(projects))
+	for dir := range projects {
+		out = append(out, dir)
+	}
+	return out
 }
 
 func stringField(m map[string]any, k string) string {

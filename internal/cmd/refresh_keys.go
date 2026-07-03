@@ -34,11 +34,12 @@ func refreshKeysCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "refresh-keys",
-		Short: "Rotate MCP bearer tokens in ~/.claude/settings.json and ~/.codex + project .codex configs",
+		Short: "Rotate MCP bearer tokens in ~/.claude.json, project .mcp.json files, and ~/.codex + project .codex configs",
 		Long: `Rotates per-service MCP keys for every Cassandra service registered
-in the user-scope settings.json. Also walks the user-scope codex
-config (~/.codex/config.toml) plus <cwd>/.codex/config.toml when
-present, refreshing inline Authorization headers there too.
+in ~/.claude.json (user or project scope), in a project-level .mcp.json
+(cwd or any project dir Claude has recorded), or in a codex config
+(~/.codex/config.toml plus <cwd>/.codex/config.toml), refreshing
+inline Authorization headers everywhere they appear.
 
 Reuses cached keys when healthy; re-mints when revoked or near expiry.
 
@@ -90,6 +91,12 @@ func runRefreshKeys(force bool, serviceFilter string, ifNearExpiry, quiet bool) 
 		return err
 	}
 
+	// Project-level .mcp.json files are a third store (separate from
+	// ~/.claude.json and codex configs). Collect every one Claude knows
+	// about — cwd plus all recorded project dirs — so keys registered
+	// only there still get rotated instead of going stale silently.
+	mcpJSONFiles := mcpJSONPaths(mcpStore)
+
 	// freshKeys captures every key minted/cached this run, keyed by
 	// service name. The codex rewrite pass below uses this to patch
 	// inline Authorization headers in ~/.codex/config.toml and any
@@ -116,7 +123,8 @@ func runRefreshKeys(force bool, serviceFilter string, ifNearExpiry, quiet bool) 
 		hasProject, _ := mcpStore.HasMCP(claudecfg.ScopeProject, svc.Name)
 		registeredClaude := hasUser || hasProject
 		registeredCodex := codexRegisteredAnywhere(svc.Name)
-		if !registeredClaude && !registeredCodex {
+		registeredMCPJSON := mcpJSONHas(mcpJSONFiles, svc.Name)
+		if !registeredClaude && !registeredCodex && !registeredMCPJSON {
 			continue
 		}
 
@@ -181,7 +189,7 @@ func runRefreshKeys(force bool, serviceFilter string, ifNearExpiry, quiet bool) 
 					},
 				})
 			}
-			if !anyURL && !registeredCodex {
+			if !anyURL && !registeredCodex && !registeredMCPJSON {
 				results = append(results, result{
 					service: svc.Name,
 					err:     errors.New("no URL available — re-run `cass setup` to register"),
@@ -203,6 +211,11 @@ func runRefreshKeys(force bool, serviceFilter string, ifNearExpiry, quiet bool) 
 	// config if either has Cassandra services. Failures are logged but
 	// don't abort the run (Claude rotation already succeeded).
 	codexTouched := rewriteCodexConfigs(freshKeys, logf)
+
+	// .mcp.json rewrite pass — patch inline Authorization headers in
+	// every project-level .mcp.json Claude knows about (cwd + all
+	// recorded project dirs), not just the current directory.
+	codexTouched = append(codexTouched, rewriteMCPJSONFiles(mcpJSONFiles, freshKeys)...)
 
 	claudeJSON, _ := claudecfg.ClaudeJSONPath()
 	logf("\n")
